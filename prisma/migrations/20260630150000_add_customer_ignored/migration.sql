@@ -1,0 +1,1 @@
+ALTER TABLE "Customer" ADD COLUMN "ignored" BOOLEAN NOT NULL DEFAULT false;

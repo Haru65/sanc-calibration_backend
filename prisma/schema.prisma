@@ -1,0 +1,177 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int     @id @default(autoincrement())
+  username  String  @unique
+  password  String
+  email     String  @unique
+  fullName  String?
+  role      String  @default("user")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Customer {
+  id        Int     @id @default(autoincrement())
+  name      String
+  email     String?
+  phone     String
+  address   String?
+  gstin     String?
+  ignored   Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  instruments Instrument[]
+  invoices    Invoice[]
+  reports     Report[]
+}
+
+model Instrument {
+  id        Int     @id @default(autoincrement())
+  name      String
+  serial    String
+  make      String
+  model     String
+  category  String
+  customerId Int
+  dueDate   DateTime?
+  ignored   Boolean @default(false)
+  
+  // Additional instrument details
+  series    String?
+  rangeStart String?
+  rangeEnd  String?
+  rangeUnit String?
+  accuracy  String?
+  accuracyType String?
+  resolution String?
+  type      String?
+  instrumentId String?
+  calibrationPoints String?
+  readingAccuracy String?
+  description String?
+  calibrationPeriod String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  customer  Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  standards Standard[]
+  reports   Report[]
+}
+
+model Standard {
+  id                Int     @id @default(autoincrement())
+  instrumentId      Int?
+  instrument        String
+  calibrationDate   DateTime
+  reportNo          String
+  certificateNo     String
+  certExpiry        DateTime?
+  make              String?
+  serial            String?
+  range             String?
+  accuracy          String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  instrumentRef     Instrument? @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+}
+
+model Invoice {
+  id              Int     @id @default(autoincrement())
+  invoiceNumber   String  @unique
+  customerId      Int
+  calibrationDate DateTime
+  issueDate       DateTime @default(now())
+  dueDate         DateTime?
+  amount          Float?
+  status          String  @default("pending")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  customer        Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  reports         Report[]
+}
+
+model Report {
+  id              Int     @id @default(autoincrement())
+  type            String  // "calibration" or "test"
+  certificateNo   String  @unique
+  tcNumber        String? @unique
+  customerId      Int
+  instrumentId    Int?
+  invoiceId       Int?    // Link to invoice for T&C certificate
+  issueDate       DateTime @default(now())
+  status          String  @default("draft")
+  
+  // Calibration Certificate Fields
+  ulrNo           String?
+  calibrationDate DateTime?
+  dueDate         DateTime?
+  location        String?
+  procedureRef    String?
+  srfNo           String?
+  
+  // Instrument Details
+  instrumentName  String?
+  instrumentMake  String?
+  instrumentModel String?
+  instrumentSerial String?
+  instrumentRange String?
+  instrumentResolution String?
+  instrumentAccuracy String?
+  instrumentTag   String?
+  conditionOnReceipt String?
+  
+  // Environmental Conditions
+  envTemperature  String?
+  envHumidity     String?
+  envPressure     String?
+  
+  // Calibration Readings (JSON stored as string)
+  readings        String?
+  
+  // Reference Standards (JSON stored as string)
+  refStandards    String?
+  
+  // Remarks and Approvals
+  customRemark    String?
+  calibratedByName String?
+  calibratedByDesignation String?
+  approvedByName  String?
+  approvedByDesignation String?
+  
+  // Test Conformance Fields
+  poNumber        String?
+  tcDate          DateTime?
+  items           String?
+  legalDisclaimer String?
+  notes           String?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  customer        Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  instrument      Instrument? @relation(fields: [instrumentId], references: [id], onDelete: SetNull)
+  invoice         Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+}
+
+model ActivityLog {
+  id        Int     @id @default(autoincrement())
+  action    String
+  detail    String
+  status    String?
+  createdAt DateTime @default(now())
+}
