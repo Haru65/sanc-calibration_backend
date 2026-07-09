@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process'
+import dotenv from 'dotenv'
+
+dotenv.config()
 
 const commandName = (base) => (process.platform === 'win32' ? `${base}.cmd` : base)
 const migrateRetries = Number.parseInt(process.env.MIGRATE_RETRIES || '5', 10)
