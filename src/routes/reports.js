@@ -1,4 +1,5 @@
 import express from 'express';
+import cors from 'cors';
 import { authenticate } from '../middleware/auth.js';
 import {
   getAllReports,
@@ -10,6 +11,16 @@ import {
 } from '../controllers/reportController.js';
 
 const router = express.Router();
+
+// CORS configuration for PDF rendering
+const pdfCorsOptions = {
+  origin: ['https://sanc.zeptac.com', 'http://localhost:5173', 'http://localhost:3000'],
+  credentials: true,
+  methods: ['POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  exposedHeaders: ['Content-Disposition'],
+  optionsSuccessStatus: 200
+};
 
 /**
  * @swagger
@@ -34,7 +45,9 @@ const router = express.Router();
  */
 router.get('/', authenticate, getAllReports);
 
-router.post('/render-pdf', authenticate, renderReportPdf);
+// Handle preflight request for PDF rendering
+router.options('/render-pdf', cors(pdfCorsOptions));
+router.post('/render-pdf', cors(pdfCorsOptions), authenticate, renderReportPdf);
 
 /**
  * @swagger

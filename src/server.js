@@ -23,15 +23,34 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
+const allowedOrigins = [
+  'https://sanc.zeptac.com',
+  'http://localhost:5173',
+  'http://localhost:3000',
+  process.env.CORS_ORIGIN
+].filter(Boolean);
+
 app.use(cors({
-  origin: '*', // Allow all origins for now
-  credentials: false,
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) return callback(null, true);
+    
+    // Allow all origins in development, specific origins in production
+    if (process.env.NODE_ENV === 'development' || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(null, true); // Allow all for now, can restrict later
+    }
+  },
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  optionsSuccessStatus: 200
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  exposedHeaders: ['Content-Disposition'],
+  optionsSuccessStatus: 200,
+  maxAge: 86400 // 24 hours
 }));
 
-// Handle preflight requests
+// Handle preflight requests explicitly
 app.options('*', cors());
 
 app.use(express.json({ limit: '10mb' }));
