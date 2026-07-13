@@ -55,18 +55,44 @@ app.options('*', cors());
 
 app.use(express.json({ limit: '10mb' }));
 
-// Rate limiting
+// Rate limiting - More permissive limits to avoid "Too Many Requests" errors
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 1000, // Increased from 100 to 1000 requests per 15 minutes
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Skip rate limiting for certain IPs or conditions if needed
+  skip: (req) => {
+    // Skip rate limiting in development
+    return process.env.NODE_ENV === 'development';
+  }
 });
-app.use(limiter);
+
+// Apply general rate limiter to all routes except auth
+app.use((req, res, next) => {
+  // Skip rate limiting for health check
+  if (req.path === '/health') {
+    return next();
+  }
+  return limiter(req, res, next);
+});
+
+// Stricter rate limit specifically for auth routes
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 50, // 50 login attempts per 15 minutes
+  message: { error: 'Too many login attempts, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true // Don't count successful logins
+});
 
 // Swagger documentation
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // Routes
-app.use('/auth', authRoutes);
+app.use('/auth', authLimiter, authRoutes); // Apply stricter limit to auth
 app.use('/customers', customerRoutes);
 app.use('/instruments', instrumentRoutes);
 app.use('/standards', standardRoutes);
