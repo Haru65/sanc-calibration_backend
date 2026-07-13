@@ -66,7 +66,7 @@ model Instrument {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   
-  customer  Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer  Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
   standards Standard[]
   reports   Report[]
 }
@@ -101,7 +101,7 @@ model Invoice {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   
-  customer        Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer        Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
   reports         Report[]
 }
 
@@ -163,7 +163,7 @@ model Report {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   
-  customer        Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer        Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
   instrument      Instrument? @relation(fields: [instrumentId], references: [id], onDelete: SetNull)
   invoice         Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
 }
