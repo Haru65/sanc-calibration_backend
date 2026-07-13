@@ -35,6 +35,10 @@ model Customer {
   instruments Instrument[]
   invoices    Invoice[]
   reports     Report[]
+  
+  @@index([name])
+  @@index([ignored])
+  @@index([createdAt])
 }
 
 model Instrument {
@@ -69,6 +73,12 @@ model Instrument {
   customer  Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
   standards Standard[]
   reports   Report[]
+  
+  @@index([customerId])
+  @@index([category])
+  @@index([ignored])
+  @@index([dueDate])
+  @@index([serial])
 }
 
 model Standard {
@@ -103,6 +113,10 @@ model Invoice {
   
   customer        Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
   reports         Report[]
+  
+  @@index([customerId])
+  @@index([status])
+  @@index([issueDate])
 }
 
 model Report {
@@ -166,6 +180,13 @@ model Report {
   customer        Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
   instrument      Instrument? @relation(fields: [instrumentId], references: [id], onDelete: SetNull)
   invoice         Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  
+  @@index([customerId])
+  @@index([instrumentId])
+  @@index([invoiceId])
+  @@index([type])
+  @@index([status])
+  @@index([issueDate])
 }
 
 model ActivityLog {
