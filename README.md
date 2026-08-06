@@ -65,7 +65,8 @@ Important variables:
 DATABASE_URL=
 JWT_SECRET=
 JWT_EXPIRE=7d
-CORS_ORIGIN=
+CORS_ORIGIN=http://localhost:5173
+COOKIE_SAME_SITE=lax
 PORT=10000
 ERPNEXT_BASE_URL=
 ERPNEXT_API_KEY=
@@ -77,6 +78,10 @@ SEED_ADMIN_PASSWORD=
 SEED_ADMIN_EMAIL=admin@sanc.com
 SEED_ADMIN_NAME=Admin User
 ```
+
+Successful login creates an HttpOnly `sanc_session` cookie that lasts 7 days.
+For a separately hosted frontend and backend in production, set `CORS_ORIGIN`
+to the exact frontend URL and use `COOKIE_SAME_SITE=none` over HTTPS.
 
 Only set `RUN_DB_SEED=true` when you intentionally want startup to create or update the admin user. When enabled, `SEED_ADMIN_PASSWORD` is required.
 

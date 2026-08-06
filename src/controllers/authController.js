@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 import pkg from '@prisma/client';
-import { generateToken } from '../middleware/auth.js';
+import { clearSessionCookie, generateToken, setSessionCookie } from '../middleware/auth.js';
 import logger from '../config/logger.js';
 
 const { PrismaClient } = pkg;
@@ -27,6 +27,7 @@ export const login = async (req, res) => {
     }
 
     const token = generateToken(user.id, user.username);
+    setSessionCookie(res, token);
     
     logger.info(`User logged in: ${username}`);
     res.json({
@@ -47,6 +48,7 @@ export const login = async (req, res) => {
 
 export const logout = (req, res) => {
   logger.info(`User logged out: ${req.user.username}`);
+  clearSessionCookie(res);
   res.json({ message: 'Logged out successfully' });
 };
 
