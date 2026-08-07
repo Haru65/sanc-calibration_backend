@@ -47,7 +47,7 @@ export const login = async (req, res) => {
 };
 
 export const logout = (req, res) => {
-  logger.info(`User logged out: ${req.user.username}`);
+  logger.info(`User logged out: ${req.user?.username || 'unknown user'}`);
   clearSessionCookie(res);
   res.json({ message: 'Logged out successfully' });
 };

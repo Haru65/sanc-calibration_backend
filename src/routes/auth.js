@@ -32,14 +32,12 @@ router.post('/login', validateRequest(loginSchema), login);
  * @swagger
  * /auth/logout:
  *   post:
- *     security:
- *       - bearerAuth: []
  *     summary: Logout user
  *     responses:
  *       200:
  *         description: Logout successful
  */
-router.post('/logout', authenticate, logout);
+router.post('/logout', logout);
 
 /**
  * @swagger
