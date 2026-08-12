@@ -146,13 +146,12 @@ const normalizeInvoice = (invoice = {}) => {
   };
 };
 
-export const getApprovedPendingInvoices = async ({ limit = 50 } = {}) => {
+const getSubmittedInvoices = async ({ limit = 50, pendingOnly = false } = {}) => {
   const listBody = {
     doctype: 'Sales Invoice',
     filters: [
-      ['custom_integrated', '=', 0],
       ['docstatus', '=', 1],
-      ['workflow_state', '=', 'Approved'],
+      ...(pendingOnly ? [['custom_integrated', '=', 0]] : []),
     ],
     fields: ['name', 'custom_integrated', 'workflow_state', 'posting_date', 'customer', 'customer_name', 'po_no', 'po_date'],
     limit_page_length: Number(limit) || 50,
@@ -181,6 +180,32 @@ export const getApprovedPendingInvoices = async ({ limit = 50 } = {}) => {
     invoices,
     count: invoices.length,
   };
+};
+
+export const getRecentSubmittedInvoices = async ({ limit = 50 } = {}) =>
+  getSubmittedInvoices({ limit, pendingOnly: false });
+
+export const getPendingInvoices = async ({ limit = 50 } = {}) =>
+  getSubmittedInvoices({ limit, pendingOnly: true });
+
+export const markInvoiceIntegrated = async (invoiceName) => {
+  const name = String(invoiceName || '').trim();
+
+  if (!name) {
+    const error = new Error('ERPNext invoice name is required for integration acknowledgment');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  await erpFetch('/method/frappe.client.set_value', {
+    method: 'POST',
+    body: JSON.stringify({
+      doctype: 'Sales Invoice',
+      name,
+      fieldname: 'custom_integrated',
+      value: 1,
+    }),
+  });
 };
 
 export const checkErpNextHealth = async () => {

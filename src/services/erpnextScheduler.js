@@ -23,7 +23,7 @@ const runScheduledSync = async (reason = 'scheduled') => {
     const limit = parsePositiveInt(process.env.ERPNEXT_AUTO_SYNC_LIMIT, 50);
     const result = await runErpNextInvoiceSync({ limit });
     logger.info(
-      `ERPNext auto sync complete (${reason}): fetched=${result.fetched}, saved=${result.saved}, skipped=${result.skipped}`
+      `ERPNext auto sync complete (${reason}): fetched=${result.fetched}, saved=${result.saved}, acknowledged=${result.acknowledged}, acknowledgmentFailed=${result.acknowledgmentFailed}, skipped=${result.skipped}`
     );
   } catch (error) {
     logger.error(`ERPNext auto sync failed (${reason}):`, error);

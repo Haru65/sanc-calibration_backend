@@ -1,5 +1,10 @@
 import logger from '../config/logger.js';
-import { checkErpNextHealth, getApprovedPendingInvoices } from '../services/erpnextService.js';
+import {
+  checkErpNextHealth,
+  getPendingInvoices,
+  getRecentSubmittedInvoices,
+  markInvoiceIntegrated,
+} from '../services/erpnextService.js';
 import {
   buildCalibrationReportFromErpItem,
   getCalibrationSourceReports,
@@ -34,9 +39,9 @@ const buildReportItems = (items = []) =>
     ]),
   }));
 
-const findOrCreateCustomer = async (invoice) => {
+const findOrCreateCustomer = async (db, invoice) => {
   const name = invoice.customerName || invoice.customer || 'ERPNext Customer';
-  const existing = await prisma.customer.findFirst({
+  const existing = await db.customer.findFirst({
     where: { name: { equals: name, mode: 'insensitive' } },
   });
 
@@ -49,7 +54,7 @@ const findOrCreateCustomer = async (invoice) => {
   };
 
   if (existing) {
-    return prisma.customer.update({
+    return db.customer.update({
       where: { id: existing.id },
       data: {
         email: existing.email || data.email,
@@ -60,75 +65,77 @@ const findOrCreateCustomer = async (invoice) => {
     });
   }
 
-  return prisma.customer.create({ data });
+  return db.customer.create({ data });
 };
 
 const upsertErpInvoice = async (invoice) => {
   const invoiceNumber = cleanInvoiceNumber(invoice.invoiceNumber || invoice.id);
   if (!invoiceNumber) return { skipped: true, reason: 'Missing invoice number' };
 
-  const customer = await findOrCreateCustomer(invoice);
-  const issueDate = parseDate(invoice.invoiceDate || invoice.poDate);
-  const invoiceRecord = await prisma.invoice.upsert({
-    where: { invoiceNumber },
-    update: {
+  return prisma.$transaction(async (tx) => {
+    const customer = await findOrCreateCustomer(tx, invoice);
+    const issueDate = parseDate(invoice.invoiceDate || invoice.poDate);
+    const invoiceRecord = await tx.invoice.upsert({
+      where: { invoiceNumber },
+      update: {
+        customerId: customer.id,
+        issueDate,
+        calibrationDate: parseDate(invoice.poDate || invoice.invoiceDate, issueDate),
+        amount: invoice.amount,
+        status: invoice.status || 'Submitted',
+      },
+      create: {
+        invoiceNumber,
+        customerId: customer.id,
+        issueDate,
+        calibrationDate: parseDate(invoice.poDate || invoice.invoiceDate, issueDate),
+        amount: invoice.amount,
+        status: invoice.status || 'Submitted',
+      },
+    });
+
+    const reportItems = buildReportItems(invoice.items || []);
+    const reportData = {
+      type: 'test',
+      certificateNo: invoiceNumber,
+      tcNumber: invoiceNumber,
       customerId: customer.id,
+      invoiceId: invoiceRecord.id,
       issueDate,
-      calibrationDate: parseDate(invoice.poDate || invoice.invoiceDate, issueDate),
-      amount: invoice.amount,
-      status: invoice.status || 'Approved',
-    },
-    create: {
-      invoiceNumber,
-      customerId: customer.id,
-      issueDate,
-      calibrationDate: parseDate(invoice.poDate || invoice.invoiceDate, issueDate),
-      amount: invoice.amount,
-      status: invoice.status || 'Approved',
-    },
+      status: 'issued',
+      poNumber: invoice.poNumber || '',
+      tcDate: issueDate,
+      items: JSON.stringify(reportItems),
+      notes:
+        'This is to certify that the material has been checked for Visual, Dimensional and Performance tests and found within accuracy.',
+      legalDisclaimer:
+        'We confirm the specifications and performance for a period of 12 months from the date of commissioning or 18 months from the date of dispatch, whichever is earlier, for manufacturing defects only. We reserve the right of repair or to replace the defective material in parts or in full depending upon the nature of the defect & observation. Furthermore, all warranties cease to apply if the instruction manual is not followed.',
+    };
+
+    const report = await tx.report.upsert({
+      where: { certificateNo: invoiceNumber },
+      update: reportData,
+      create: reportData,
+      include: {
+        customer: true,
+        invoice: true,
+        instrument: true,
+      },
+    });
+
+    return {
+      skipped: false,
+      invoice: invoiceRecord,
+      report,
+    };
   });
-
-  const reportItems = buildReportItems(invoice.items || []);
-  const reportData = {
-    type: 'test',
-    certificateNo: invoiceNumber,
-    tcNumber: invoiceNumber,
-    customerId: customer.id,
-    invoiceId: invoiceRecord.id,
-    issueDate,
-    status: 'issued',
-    poNumber: invoice.poNumber || '',
-    tcDate: issueDate,
-    items: JSON.stringify(reportItems),
-    notes:
-      'This is to certify that the material has been checked for Visual, Dimensional and Performance tests and found within accuracy.',
-    legalDisclaimer:
-      'We confirm the specifications and performance for a period of 12 months from the date of commissioning or 18 months from the date of dispatch, whichever is earlier, for manufacturing defects only. We reserve the right of repair or to replace the defective material in parts or in full depending upon the nature of the defect & observation. Furthermore, all warranties cease to apply if the instruction manual is not followed.',
-  };
-
-  const report = await prisma.report.upsert({
-    where: { certificateNo: invoiceNumber },
-    update: reportData,
-    create: reportData,
-    include: {
-      customer: true,
-      invoice: true,
-      instrument: true,
-    },
-  });
-
-  return {
-    skipped: false,
-    invoice: invoiceRecord,
-    report,
-  };
 };
 
 export const getErpNextPurchaseOrders = async (req, res) => {
   try {
     const started = Date.now();
     const limit = req.query.limit || 50;
-    const data = await getApprovedPendingInvoices({ limit });
+    const data = await getRecentSubmittedInvoices({ limit });
 
     res.json({
       ...data,
@@ -157,22 +164,45 @@ export const getErpNextHealth = async (req, res) => {
   }
 };
 
-export const runErpNextInvoiceSync = async ({ limit = 50 } = {}) => {
-  const data = await getApprovedPendingInvoices({ limit });
+export const runErpNextInvoiceSync = async ({ limit = 50, includeIntegrated = false } = {}) => {
+  const data = includeIntegrated
+    ? await getRecentSubmittedInvoices({ limit })
+    : await getPendingInvoices({ limit });
   const results = [];
 
   for (const invoice of data.purchaseOrders) {
-    results.push(await upsertErpInvoice(invoice));
+    const result = await upsertErpInvoice(invoice);
+
+    if (!result.skipped) {
+      try {
+        await markInvoiceIntegrated(invoice.invoiceNumber || invoice.id);
+        result.acknowledged = true;
+      } catch (error) {
+        result.acknowledged = false;
+        result.acknowledgmentError = error.message;
+        logger.error(`ERPNext acknowledgment failed for ${invoice.invoiceNumber || invoice.id}:`, error);
+      }
+    }
+
+    results.push(result);
   }
 
   const saved = results.filter((result) => !result.skipped);
   const skipped = results.filter((result) => result.skipped);
+  const acknowledged = saved.filter((result) => result.acknowledged);
+  const acknowledgmentFailed = saved.filter((result) => !result.acknowledged);
 
   return {
     fetched: data.count,
     saved: saved.length,
+    acknowledged: acknowledged.length,
+    acknowledgmentFailed: acknowledgmentFailed.length,
     skipped: skipped.length,
     reports: saved.map((result) => result.report),
+    acknowledgmentErrors: acknowledgmentFailed.map((result) => ({
+      invoiceNumber: result.invoice?.invoiceNumber,
+      error: result.acknowledgmentError,
+    })),
     skippedItems: skipped,
   };
 };
@@ -180,7 +210,9 @@ export const runErpNextInvoiceSync = async ({ limit = 50 } = {}) => {
 export const syncErpNextInvoices = async (req, res) => {
   try {
     const limit = req.query.limit || req.body?.limit || 50;
-    const result = await runErpNextInvoiceSync({ limit });
+    const includeIntegratedValue = req.query.includeIntegrated ?? req.body?.includeIntegrated;
+    const includeIntegrated = ['1', 'true'].includes(String(includeIntegratedValue).toLowerCase());
+    const result = await runErpNextInvoiceSync({ limit, includeIntegrated });
     res.json(result);
   } catch (error) {
     logger.error('ERPNext invoice sync error:', error);
