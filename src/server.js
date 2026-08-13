@@ -48,6 +48,9 @@ app.options('*', cors(corsOptions));
 
 app.use(express.json({ limit: '10mb' }));
 
+// The production Node process is directly behind one reverse proxy (Nginx).
+app.set('trust proxy', 1);
+
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
