@@ -51,10 +51,16 @@ app.use(express.json({ limit: '10mb' }));
 // The production Node process is directly behind one reverse proxy (Nginx).
 app.set('trust proxy', 1);
 
-// Rate limiting
+const rateLimitWindowMs = Number.parseInt(process.env.RATE_LIMIT_WINDOW_MS || '', 10) || 15 * 60 * 1000;
+const rateLimitMax = Number.parseInt(process.env.RATE_LIMIT_MAX || '', 10) || 1000;
+
+// General API protection. Health checks are excluded so monitoring stays available.
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100
+  windowMs: rateLimitWindowMs,
+  max: rateLimitMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === '/health',
 });
 app.use(limiter);
 
