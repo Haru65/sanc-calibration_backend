@@ -26,6 +26,7 @@ const formatDate = (value) => {
 };
 
 const parseJson = (value, fallback = null) => {
+  if (value && typeof value === 'object') return value;
   if (!value || typeof value !== 'string') return fallback;
   try {
     return JSON.parse(value);
@@ -74,16 +75,11 @@ const parsePoints = (instrument) => {
   }));
 };
 
+const minimumReadingRows = (type) => (type === 'switch' ? 3 : REQUIRED_READING_ROWS);
+
 const normalizeReadingPoints = (points, instrument, type) => {
-  if (points.length >= REQUIRED_READING_ROWS) {
-    return Array.from({ length: REQUIRED_READING_ROWS }, (_, index) => {
-      const sourceIndex =
-        REQUIRED_READING_ROWS > 1
-          ? Math.round((index / (REQUIRED_READING_ROWS - 1)) * (points.length - 1))
-          : 0;
-      return points[Math.min(points.length - 1, sourceIndex)];
-    });
-  }
+  const requiredRows = minimumReadingRows(type);
+  if (points.length >= requiredRows) return points;
 
   const start = numberValue(instrument.rangeStart) ?? 0;
   const end = numberValue(instrument.rangeEnd);
@@ -94,10 +90,10 @@ const normalizeReadingPoints = (points, instrument, type) => {
         ? 100
         : 60;
   const resolvedEnd = end !== null && end !== start ? end : fallbackEnd;
-  const step = REQUIRED_READING_ROWS > 1 ? (resolvedEnd - start) / (REQUIRED_READING_ROWS - 1) : 0;
+  const step = requiredRows > 1 ? (resolvedEnd - start) / (requiredRows - 1) : 0;
   const normalized = [...points];
 
-  while (normalized.length < REQUIRED_READING_ROWS) {
+  while (normalized.length < requiredRows) {
     const index = normalized.length;
     normalized.push({
       set: start + step * index,
@@ -183,29 +179,44 @@ const referenceOffsetForRow = (instrument, set, start, span, converted) => {
   return interpolateOffset(REFERENCE_NOMINALS[type], offsets, normalizedSet);
 };
 
-const buildRows = (instrument, typeOverride = null) => {
+const isConvertedReadingType = (type) =>
+  type === 'transmitter' ||
+  type === 'humidityTemperature' ||
+  type === 'humidityHumidity';
+
+const readingValue = (row, ...keys) => {
+  for (const key of keys) {
+    const numeric = numberValue(row?.[key]);
+    if (numeric !== null) return numeric;
+  }
+
+  return null;
+};
+
+export const calculateReadingRows = (rows = [], instrument = {}, typeOverride = null) => {
   const type = typeOverride || inferType(instrument);
   const start = numberValue(instrument.rangeStart) ?? 0;
-  const end = numberValue(instrument.rangeEnd);
-  const points = normalizeReadingPoints(parsePoints(instrument), instrument, type);
-  const maxPoint = Math.max(0, ...points.map((row) => numberValue(row.set)).filter((value) => value !== null));
+  const end = numberValue(instrument.highestRange) ?? numberValue(instrument.rangeEnd);
+  const points = normalizeReadingPoints(rows, instrument, type);
+  const maxPoint = Math.max(0, ...points.map((row) => numberValue(row.set ?? row.master ?? row.calibrationPoint)).filter((value) => value !== null));
   const span = end !== null && end !== start ? end - start : maxPoint || 100;
   const unit = instrument.rangeUnit || '';
-  const converted = type === 'transmitter' || type === 'humidityTemperature' || type === 'humidityHumidity';
+  const converted = isConvertedReadingType(type);
 
   return points.map((row) => {
-    const set = numberValue(row.set) ?? 0;
+    const set = numberValue(row.set ?? row.master ?? row.calibrationPoint ?? row.point) ?? 0;
     const correspondingMA = converted ? 4 + (16 / span) * (set - start) : null;
     const defaultReading = converted ? correspondingMA : set;
     const referenceOffset = referenceOffsetForRow(instrument, set, start, span, converted);
     const generatedReading = defaultReading + referenceOffset;
-    const up = numberValue(row.up) ?? generatedReading;
-    const down = numberValue(row.down) ?? generatedReading;
+    const up = readingValue(row, 'up', 'standardUp', 'switchingUp') ?? generatedReading;
+    const down = readingValue(row, 'down', 'standardDown', 'switchingDown') ?? generatedReading;
     const mean = (up + down) / 2;
     const correspondingValue = converted ? (mean - 4) * (span / 16) + start : set;
-    const error = converted ? correspondingValue - set : correspondingValue - mean;
+    const error = converted ? set - correspondingValue : correspondingValue - mean;
 
     return {
+      ...row,
       set: formatNumber(set),
       master: formatNumber(set),
       unit,
@@ -215,10 +226,63 @@ const buildRows = (instrument, typeOverride = null) => {
       correspondingMA: converted ? formatNumber(correspondingMA) : '',
       correspondingValue: converted ? formatNumber(correspondingValue) : '',
       correspondingPressure: formatNumber(correspondingValue),
+      uucReading: converted ? formatNumber(correspondingValue) : formatNumber(set),
       error: formatNumber(error, 4),
       unc: row.unc ?? instrument.readingAccuracy ?? instrument.accuracy ?? '',
     };
   });
+};
+
+const buildRows = (instrument, typeOverride = null) =>
+  calculateReadingRows(parsePoints(instrument), instrument, typeOverride);
+
+export const calculateReadingsPayload = (readings, instrument = {}) => {
+  const payload = parseJson(readings, readings || {});
+  const payloadObject = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+
+  if (payload?.sections?.length) {
+    return {
+      ...payload,
+      sections: payload.sections.map((section) => {
+        const sectionType = section.tableType || section.type || instrument.tableType;
+        const sectionInstrument = {
+          ...instrument,
+          ...payload,
+          ...section,
+          rangeUnit: section.unit || payload.unit || instrument.rangeUnit,
+          rangeEnd: section.highestRange ?? payload.highestRange ?? instrument.rangeEnd,
+        };
+
+        return {
+          ...section,
+          tableType: sectionType,
+          rows: calculateReadingRows(section.rows || [], sectionInstrument, sectionType),
+        };
+      }),
+    };
+  }
+
+  const rows = Array.isArray(payload) ? payload : payload?.rows || [];
+  const type = payloadObject.tableType || payloadObject.type || instrument.tableType || inferType(instrument);
+  const calculationInstrument = {
+    ...instrument,
+    ...payloadObject,
+    rangeUnit: payloadObject.unit || instrument.rangeUnit,
+    rangeEnd: payloadObject.highestRange ?? instrument.rangeEnd,
+  };
+
+  if (Array.isArray(payload)) {
+    return calculateReadingRows(rows, calculationInstrument, type);
+  }
+
+  return {
+    ...payloadObject,
+    tableType: type,
+    unit: payloadObject.unit || instrument.rangeUnit || '',
+    rangeStart: numberValue(calculationInstrument.rangeStart) ?? 0,
+    highestRange: numberValue(calculationInstrument.rangeEnd),
+    rows: calculateReadingRows(rows, calculationInstrument, type),
+  };
 };
 
 const buildReadings = (instrument) => {
@@ -375,6 +439,11 @@ const nonEmpty = (...values) => {
   return found ?? 'N/A';
 };
 
+const firstNonEmpty = (...values) => {
+  const found = values.find((value) => value !== undefined && value !== null && String(value).trim() !== '');
+  return found ?? '';
+};
+
 const normalizeKey = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 
 const itemSpecValue = (item, ...keys) => {
@@ -424,13 +493,58 @@ const inferCategoryFromItem = (item) => {
 const parseRangeSpec = (value) => {
   const matches = String(value || '').match(/-?\d+(?:\.\d+)?/g) || [];
   const values = matches.map(Number);
-  const unit = String(value || '').replace(/[-\d.,\s]+/g, '').trim();
+  const unit = String(value || '')
+    .replace(/-?\d+(?:\.\d+)?/g, ' ')
+    .replace(/\bto\b/gi, ' ')
+    .replace(/[-–—.,]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
   return {
     start: values.length ? String(values[0]) : '',
     end: values.length ? String(Math.max(...values)) : '',
     unit,
   };
+};
+
+const reportInstrumentContext = (report = {}, instrument = null) => {
+  const range = parseRangeSpec(report.instrumentRange);
+
+  return {
+    ...(instrument || {}),
+    name: firstNonEmpty(instrument?.name, report.instrumentName),
+    make: firstNonEmpty(instrument?.make, report.instrumentMake),
+    model: firstNonEmpty(instrument?.model, report.instrumentModel),
+    serial: firstNonEmpty(instrument?.serial, report.instrumentSerial),
+    category: firstNonEmpty(instrument?.category, report.instrumentName),
+    rangeStart: firstNonEmpty(instrument?.rangeStart, range.start),
+    rangeEnd: firstNonEmpty(instrument?.rangeEnd, range.end),
+    rangeUnit: firstNonEmpty(instrument?.rangeUnit, range.unit),
+    accuracy: firstNonEmpty(instrument?.accuracy, report.instrumentAccuracy),
+    resolution: firstNonEmpty(instrument?.resolution, report.instrumentResolution),
+    type: firstNonEmpty(instrument?.type),
+    calibrationPoints: firstNonEmpty(instrument?.calibrationPoints),
+    readingAccuracy: firstNonEmpty(instrument?.readingAccuracy, report.instrumentAccuracy),
+  };
+};
+
+export const buildCalculatedReadingsForReport = async (reportData = {}, existingReport = null) => {
+  const report = { ...(existingReport || {}), ...reportData };
+  const instrumentId = reportData.instrumentId ?? existingReport?.instrumentId;
+  let instrument = report.instrument || existingReport?.instrument || null;
+
+  if (!instrument && instrumentId) {
+    instrument = await prisma.instrument.findUnique({
+      where: { id: Number(instrumentId) },
+      include: { standards: true },
+    });
+  }
+
+  const context = reportInstrumentContext(report, instrument);
+  const sourceReadings = reportData.readings !== undefined ? reportData.readings : report.readings;
+  const baseReadings = sourceReadings || buildReadings(context);
+
+  return calculateReadingsPayload(baseReadings, context);
 };
 
 const buildFallbackInstrumentFromItem = async (item) => {

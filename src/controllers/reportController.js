@@ -3,7 +3,10 @@ import logger from '../config/logger.js';
 import fs from 'fs/promises';
 import puppeteer from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';
-import { buildReportStandards } from '../services/calibrationReportService.js';
+import {
+  buildCalculatedReadingsForReport,
+  buildReportStandards,
+} from '../services/calibrationReportService.js';
 
 const { PrismaClient } = pkg;
 const prisma = new PrismaClient();
@@ -191,6 +194,41 @@ const sanitizeReportData = (data) => {
   return { data: next, errors };
 };
 
+const stripReportControlFields = (data) => {
+  const {
+    calculateReadings,
+    autoCalculateReadings,
+    ...reportData
+  } = data;
+
+  return reportData;
+};
+
+const shouldCalculateReadings = (data, existingReport = null) => {
+  const type = data.type ?? existingReport?.type;
+  if (type !== 'calibration') return false;
+  if (data.calculateReadings === false || data.autoCalculateReadings === false) return false;
+
+  return (
+    data.readings !== undefined ||
+    data.calculateReadings === true ||
+    data.autoCalculateReadings === true ||
+    (!existingReport && data.instrumentId)
+  );
+};
+
+const prepareReportData = async (data, existingReport = null) => {
+  const reportData = stripReportControlFields(data);
+
+  if (shouldCalculateReadings(data, existingReport)) {
+    reportData.readings = JSON.stringify(
+      await buildCalculatedReadingsForReport(reportData, existingReport)
+    );
+  }
+
+  return reportData;
+};
+
 export const renderReportPdf = async (req, res) => {
   try {
     const { html, filename } = req.body || {};
@@ -208,6 +246,16 @@ export const renderReportPdf = async (req, res) => {
   } catch (error) {
     logger.error('Render report PDF error:', error);
     res.status(500).json({ error: error.message || 'Failed to render PDF' });
+  }
+};
+
+export const calculateReportReadings = async (req, res) => {
+  try {
+    const readings = await buildCalculatedReadingsForReport(req.body || {});
+    res.json(readings);
+  } catch (error) {
+    logger.error('Calculate report readings error:', error);
+    res.status(500).json({ error: 'Failed to calculate readings' });
   }
 };
 
@@ -272,9 +320,10 @@ export const createReport = async (req, res) => {
   try {
     const { data, errors } = sanitizeReportData(req.validated ?? req.body);
     if (errors.length) return res.status(400).json({ errors });
+    const reportData = await prepareReportData(data);
 
     const report = await prisma.report.create({
-      data,
+      data: reportData,
       include: reportInclude,
     });
 
@@ -291,10 +340,20 @@ export const updateReport = async (req, res) => {
     const { id } = req.params;
     const { data, errors } = sanitizeReportData(req.validated ?? req.body);
     if (errors.length) return res.status(400).json({ errors });
+    const existingReport = await prisma.report.findUnique({
+      where: { id: parseInt(id) },
+      include: reportInclude,
+    });
+
+    if (!existingReport) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    const reportData = await prepareReportData(data, existingReport);
 
     const report = await prisma.report.update({
       where: { id: parseInt(id) },
-      data,
+      data: reportData,
       include: reportInclude,
     });
 

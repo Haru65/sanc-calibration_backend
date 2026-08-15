@@ -4,6 +4,7 @@ import {
   getAllReports,
   getReportById,
   renderReportPdf,
+  calculateReportReadings,
   createReport,
   updateReport,
   deleteReport
@@ -35,6 +36,7 @@ const router = express.Router();
 router.get('/', authenticate, getAllReports);
 
 router.post('/render-pdf', authenticate, renderReportPdf);
+router.post('/calculate-readings', authenticate, calculateReportReadings);
 
 /**
  * @swagger
