@@ -16,6 +16,36 @@ const formatNumber = (value, digits = 2) => {
   return numeric.toFixed(digits).replace(/\.?0+$/, '');
 };
 
+const roundedDisplayNumber = (value, digits = 2) => {
+  const numeric = numberValue(formatNumber(value, digits));
+  return numeric === null ? numberValue(value) : numeric;
+};
+
+const decimalPlaces = (value) => {
+  const raw = String(value ?? '').match(/-?\d+(?:\.(\d+))?/)?.[1];
+  return raw ? raw.length : 0;
+};
+
+const readingDigits = (instrument, converted) => {
+  const explicitDigits = numberValue(instrument.readingDigits);
+  if (explicitDigits !== null) return Math.min(Math.max(Math.floor(explicitDigits), 2), 5);
+
+  const quantity = numberValue(instrument.certificateQuantity) ?? 1;
+  const bulkDigits = quantity > 100 ? 5 : quantity > 50 ? 4 : 3;
+
+  if (converted) return bulkDigits;
+
+  return Math.min(
+    Math.max(
+      bulkDigits,
+      decimalPlaces(instrument.resolution),
+      decimalPlaces(instrument.readingAccuracy),
+      decimalPlaces(instrument.accuracy)
+    ),
+    5
+  );
+};
+
 const REQUIRED_READING_ROWS = 5;
 
 const formatDate = (value) => {
@@ -179,6 +209,71 @@ const referenceOffsetForRow = (instrument, set, start, span, converted) => {
   return interpolateOffset(REFERENCE_NOMINALS[type], offsets, normalizedSet);
 };
 
+const SIMULATED_READING_FACTORS = [
+  { up: 0.35, down: 0.18 },
+  { up: -0.28, down: -0.14 },
+  { up: 0.22, down: 0.08 },
+  { up: -0.34, down: -0.2 },
+  { up: 0.3, down: 0.12 },
+  { up: -0.18, down: 0.1 },
+  { up: 0.16, down: -0.06 },
+];
+
+const clampNumber = (value, min, max) => Math.min(Math.max(value, min), max);
+
+const simulatedReadingStep = (instrument, span, converted) => {
+  const rawAccuracy =
+    numberValue(instrument.readingAccuracy) ??
+    numberValue(instrument.accuracy);
+  const resolution = numberValue(instrument.resolution);
+
+  if (converted) {
+    const accuracyAsMilliamp =
+      rawAccuracy !== null && span
+        ? Math.abs(rawAccuracy / span) * 16
+        : null;
+    const resolutionAsMilliamp =
+      resolution !== null && span
+        ? Math.abs(resolution / span) * 16
+        : null;
+    const candidate = accuracyAsMilliamp ?? resolutionAsMilliamp;
+    return candidate !== null ? clampNumber(candidate, 0.001, 0.12) : 0.05;
+  }
+
+  const candidate = rawAccuracy ?? resolution;
+  const maxStep = span ? Math.max(Math.abs(span) * 0.01, candidate) : candidate;
+  if (candidate !== null) return clampNumber(Math.abs(candidate), 0.001, maxStep);
+
+  return span ? Math.abs(span) * 0.001 : 0.1;
+};
+
+const bulkCertificateReadingShift = (instrument, step, digits) => {
+  const rawIndex = numberValue(instrument.certificateUnitIndex);
+  const rawQuantity = numberValue(instrument.certificateQuantity);
+  const quantity = rawQuantity !== null ? Math.floor(rawQuantity) : 1;
+
+  if (rawIndex === null || quantity <= 1) return 0;
+
+  const unitIndex = Math.max(0, Math.floor(rawIndex));
+  const visibleIncrement = 1 / (10 ** digits);
+  const maxShift = step * 0.25;
+  const requestedShift = (unitIndex + 1) * visibleIncrement;
+
+  if (requestedShift <= maxShift) return requestedShift;
+  return ((unitIndex + 1) / (quantity + 1)) * maxShift;
+};
+
+const simulatedReadingOffsets = (instrument, rowIndex, span, converted, digits) => {
+  const step = simulatedReadingStep(instrument, span, converted);
+  const factors = SIMULATED_READING_FACTORS[rowIndex % SIMULATED_READING_FACTORS.length];
+  const certificateShift = bulkCertificateReadingShift(instrument, step, digits);
+
+  return {
+    up: step * factors.up + certificateShift,
+    down: step * factors.down + certificateShift,
+  };
+};
+
 const isConvertedReadingType = (type) =>
   type === 'transmitter' ||
   type === 'humidityTemperature' ||
@@ -202,16 +297,30 @@ export const calculateReadingRows = (rows = [], instrument = {}, typeOverride = 
   const span = end !== null && end !== start ? end - start : maxPoint || 100;
   const unit = instrument.rangeUnit || '';
   const converted = isConvertedReadingType(type);
+  const quantity = numberValue(instrument.certificateQuantity) ?? 1;
+  const requiredUniqueIncrement = simulatedReadingStep(instrument, span, converted) * 0.25 / (quantity + 1);
+  const requiredDigits =
+    quantity > 1 && requiredUniqueIncrement > 0
+      ? Math.min(Math.max(Math.ceil(-Math.log10(requiredUniqueIncrement)), 3), 5)
+      : 3;
+  const digits = Math.max(readingDigits(instrument, converted), requiredDigits);
 
-  return points.map((row) => {
+  return points.map((row, index) => {
     const set = numberValue(row.set ?? row.master ?? row.calibrationPoint ?? row.point) ?? 0;
     const correspondingMA = converted ? 4 + (16 / span) * (set - start) : null;
     const defaultReading = converted ? correspondingMA : set;
     const referenceOffset = referenceOffsetForRow(instrument, set, start, span, converted);
     const generatedReading = defaultReading + referenceOffset;
-    const up = readingValue(row, 'up', 'standardUp', 'switchingUp') ?? generatedReading;
-    const down = readingValue(row, 'down', 'standardDown', 'switchingDown') ?? generatedReading;
-    const mean = (up + down) / 2;
+    const simulatedOffsets = simulatedReadingOffsets(instrument, index, span, converted, digits);
+    const up =
+      readingValue(row, 'up', 'standardUp', 'switchingUp') ??
+      generatedReading + simulatedOffsets.up;
+    const down =
+      readingValue(row, 'down', 'standardDown', 'switchingDown') ??
+      generatedReading + simulatedOffsets.down;
+    const displayUp = roundedDisplayNumber(up, digits);
+    const displayDown = roundedDisplayNumber(down, digits);
+    const mean = (displayUp + displayDown) / 2;
     const correspondingValue = converted ? (mean - 4) * (span / 16) + start : set;
     const error = converted ? set - correspondingValue : correspondingValue - mean;
 
@@ -220,13 +329,13 @@ export const calculateReadingRows = (rows = [], instrument = {}, typeOverride = 
       set: formatNumber(set),
       master: formatNumber(set),
       unit,
-      up: formatNumber(up),
-      down: formatNumber(down),
-      mean: formatNumber(mean),
+      up: formatNumber(displayUp, digits),
+      down: formatNumber(displayDown, digits),
+      mean: formatNumber(mean, converted ? Math.max(3, digits) : digits),
       correspondingMA: converted ? formatNumber(correspondingMA) : '',
-      correspondingValue: converted ? formatNumber(correspondingValue) : '',
-      correspondingPressure: formatNumber(correspondingValue),
-      uucReading: converted ? formatNumber(correspondingValue) : formatNumber(set),
+      correspondingValue: converted ? formatNumber(correspondingValue, 4) : '',
+      correspondingPressure: formatNumber(correspondingValue, converted ? 4 : 2),
+      uucReading: converted ? formatNumber(correspondingValue, 4) : formatNumber(set),
       error: formatNumber(error, 4),
       unc: row.unc ?? instrument.readingAccuracy ?? instrument.accuracy ?? '',
     };
@@ -235,6 +344,19 @@ export const calculateReadingRows = (rows = [], instrument = {}, typeOverride = 
 
 const buildRows = (instrument, typeOverride = null) =>
   calculateReadingRows(parsePoints(instrument), instrument, typeOverride);
+
+const rowsReadingDigits = (rows = []) =>
+  Math.min(
+    Math.max(
+      2,
+      ...rows.flatMap((row) => [
+        decimalPlaces(row.up),
+        decimalPlaces(row.down),
+        decimalPlaces(row.mean),
+      ])
+    ),
+    5
+  );
 
 export const calculateReadingsPayload = (readings, instrument = {}) => {
   const payload = parseJson(readings, readings || {});
@@ -285,35 +407,55 @@ export const calculateReadingsPayload = (readings, instrument = {}) => {
   };
 };
 
-const buildReadings = (instrument) => {
+const buildReadings = (instrument, options = {}) => {
   const type = inferType(instrument);
+  const certificateQuantity = numberValue(options.quantity) ?? 1;
+  const certificateUnitIndex = numberValue(options.unitIndex);
+  const seededInstrument = {
+    ...instrument,
+    certificateQuantity,
+    certificateUnitIndex,
+  };
 
   if (type === 'humidity') {
+    const temperatureRows = buildRows(seededInstrument, 'humidityTemperature');
+    const humidityRows = buildRows(seededInstrument, 'humidityHumidity');
+    const digits = Math.max(rowsReadingDigits(temperatureRows), rowsReadingDigits(humidityRows));
+
     return {
       tableType: 'humidity',
+      certificateQuantity,
+      certificateUnitIndex,
+      readingDigits: digits,
       sections: [
         {
           tableType: 'humidityTemperature',
           title: 'Humidity Transmitter - Temperature',
           unit: 'deg C',
-          rows: buildRows(instrument, 'humidityTemperature'),
+          rows: temperatureRows,
         },
         {
           tableType: 'humidityHumidity',
           title: 'Humidity Transmitter - Humidity',
           unit: '%RH',
-          rows: buildRows(instrument, 'humidityHumidity'),
+          rows: humidityRows,
         },
       ],
     };
   }
 
+  const rows = buildRows(seededInstrument, type);
+  const digits = rowsReadingDigits(rows);
+
   return {
     tableType: type,
-    unit: instrument.rangeUnit || '',
-    rangeStart: numberValue(instrument.rangeStart) ?? 0,
-    highestRange: numberValue(instrument.rangeEnd),
-    rows: buildRows(instrument, type),
+    certificateQuantity,
+    certificateUnitIndex,
+    readingDigits: digits,
+    unit: seededInstrument.rangeUnit || '',
+    rangeStart: numberValue(seededInstrument.rangeStart) ?? 0,
+    highestRange: numberValue(seededInstrument.rangeEnd),
+    rows,
   };
 };
 
@@ -621,8 +763,20 @@ const findInstrumentForItem = async (item, instrumentId) => {
   );
 };
 
-const buildCertificateNo = (invoiceNumber, instrument) =>
-  `CAL-${String(invoiceNumber || 'ERP').replace(/[^\w-]+/g, '-')}-${instrument.id}`;
+const itemQuantity = (item) => {
+  const raw = item?.qty ?? item?.quantity ?? 1;
+  const numeric = Number(String(raw).match(/\d+(?:\.\d+)?/)?.[0]);
+  return Number.isFinite(numeric) && numeric > 0 ? Math.max(1, Math.floor(numeric)) : 1;
+};
+
+const buildCertificateNo = (invoiceNumber, instrument, itemIndex = 0, unitIndex = 0) =>
+  [
+    'CAL',
+    String(invoiceNumber || 'ERP').replace(/[^\w-]+/g, '-'),
+    `L${Number(itemIndex) + 1}`,
+    `U${Number(unitIndex) + 1}`,
+    instrument.id,
+  ].join('-');
 
 export const getCalibrationSourceReports = async () =>
   prisma.report.findMany({
@@ -638,7 +792,12 @@ export const getCalibrationSourceReports = async () =>
     take: 50,
   });
 
-export const buildCalibrationReportFromErpItem = async ({ sourceReportId, itemIndex = 0, instrumentId }) => {
+export const buildCalibrationReportFromErpItem = async ({
+  sourceReportId,
+  itemIndex = 0,
+  unitIndex = 0,
+  instrumentId,
+}) => {
   const sourceReport = await prisma.report.findUnique({
     where: { id: Number(sourceReportId) },
     include: {
@@ -677,9 +836,16 @@ export const buildCalibrationReportFromErpItem = async ({ sourceReportId, itemIn
   const dueDate = new Date(calibrationDate);
   dueDate.setMonth(dueDate.getMonth() + periodMonths);
 
-  const certificateNo = buildCertificateNo(sourceReport.invoice?.invoiceNumber || sourceReport.tcNumber, {
-    id: resolvedInstrument.__fallbackTemplate ? `ERP-${sourceReport.id}-${Number(itemIndex)}` : resolvedInstrument.id,
-  });
+  const quantity = itemQuantity(item);
+  const normalizedUnitIndex = Math.max(0, Math.min(Number(unitIndex) || 0, quantity - 1));
+  const certificateNo = buildCertificateNo(
+    sourceReport.invoice?.invoiceNumber || sourceReport.tcNumber,
+    {
+      id: resolvedInstrument.__fallbackTemplate ? `ERP-${sourceReport.id}` : resolvedInstrument.id,
+    },
+    itemIndex,
+    normalizedUnitIndex
+  );
   const refStandards = buildReportStandards(resolvedInstrument);
   const reportData = {
     type: 'calibration',
@@ -703,9 +869,12 @@ export const buildCalibrationReportFromErpItem = async ({ sourceReportId, itemIn
     conditionOnReceipt: 'Good',
     envTemperature: '25±5',
     envHumidity: '40-70',
-    readings: JSON.stringify(buildReadings(resolvedInstrument)),
+    readings: JSON.stringify(buildReadings(resolvedInstrument, {
+      unitIndex: normalizedUnitIndex,
+      quantity,
+    })),
     refStandards: JSON.stringify(refStandards),
-    customRemark: `Generated from ERPNext invoice ${sourceReport.invoice?.invoiceNumber || sourceReport.tcNumber || ''}. PO: ${sourceReport.poNumber || 'N/A'}${resolvedInstrument.__fallbackTemplate ? '. Internal category template used because no exact instrument match was found.' : ''}`,
+    customRemark: `Generated from ERPNext invoice ${sourceReport.invoice?.invoiceNumber || sourceReport.tcNumber || ''}. PO: ${sourceReport.poNumber || 'N/A'}. Line ${Number(itemIndex) + 1}, unit ${normalizedUnitIndex + 1} of ${quantity}${resolvedInstrument.__fallbackTemplate ? '. Internal category template used because no exact instrument match was found.' : ''}`,
     calibratedByName: 'Rahul Patel',
     calibratedByDesignation: 'Lab Engineer',
     approvedByName: 'Prashant Patel',
@@ -722,4 +891,39 @@ export const buildCalibrationReportFromErpItem = async ({ sourceReportId, itemIn
       invoice: true,
     },
   });
+};
+
+export const buildCalibrationReportsFromErpItem = async ({
+  sourceReportId,
+  itemIndex = 0,
+  instrumentId,
+}) => {
+  const sourceReport = await prisma.report.findUnique({
+    where: { id: Number(sourceReportId) },
+    select: { items: true },
+  });
+
+  if (!sourceReport) {
+    const error = new Error('Source ERPNext report not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const items = parseJson(sourceReport.items, []);
+  const item = items[Number(itemIndex)] || items[0];
+  const quantity = itemQuantity(item);
+  const reports = [];
+
+  for (let unitIndex = 0; unitIndex < quantity; unitIndex += 1) {
+    reports.push(
+      await buildCalibrationReportFromErpItem({
+        sourceReportId,
+        itemIndex,
+        unitIndex,
+        instrumentId,
+      })
+    );
+  }
+
+  return reports;
 };

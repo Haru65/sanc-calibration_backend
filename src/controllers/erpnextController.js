@@ -7,6 +7,7 @@ import {
 } from '../services/erpnextService.js';
 import {
   buildCalibrationReportFromErpItem,
+  buildCalibrationReportsFromErpItem,
   getCalibrationSourceReports,
 } from '../services/calibrationReportService.js';
 import pkg from '@prisma/client';
@@ -23,6 +24,17 @@ const parseDate = (value, fallback = new Date()) => {
 const cleanInvoiceNumber = (value) => String(value || '').trim();
 
 const compactSpecs = (specs) => specs.filter((spec) => String(spec.value ?? '').trim());
+
+const normalizeDeviceName = (value) =>
+  String(value || '')
+    .toLowerCase()
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+const erpItemName = (item = {}) =>
+  item.itemName || item.name || item.description || item.itemCode || '';
 
 const buildReportItems = (items = []) =>
   items.map((item, index) => ({
@@ -68,13 +80,73 @@ const findOrCreateCustomer = async (db, invoice) => {
   return db.customer.create({ data });
 };
 
+const findInstrumentByItemName = async (item) => {
+  const itemName = normalizeDeviceName(erpItemName(item));
+  if (!itemName) return null;
+
+  const instruments = await prisma.instrument.findMany({
+    where: { ignored: false },
+    select: {
+      id: true,
+      name: true,
+    },
+  });
+
+  const candidates = instruments
+    .map((instrument) => ({
+      ...instrument,
+      normalizedName: normalizeDeviceName(instrument.name),
+    }))
+    .filter((instrument) => instrument.normalizedName);
+
+  return (
+    candidates.find((instrument) => instrument.normalizedName === itemName) ||
+    candidates.find((instrument) =>
+      itemName.length >= 3 &&
+      instrument.normalizedName.length >= 3 &&
+      (itemName.includes(instrument.normalizedName) || instrument.normalizedName.includes(itemName))
+    ) ||
+    null
+  );
+};
+
+const resolveInvoiceInstruments = async (items = []) => {
+  if (!items.length) {
+    return {
+      matched: [],
+      missing: ['No ERPNext invoice items found'],
+    };
+  }
+
+  const matched = [];
+  const missing = [];
+
+  for (const [index, item] of items.entries()) {
+    const instrument = await findInstrumentByItemName(item);
+
+    if (instrument) {
+      matched.push({ itemIndex: index, instrument });
+    } else {
+      missing.push(erpItemName(item) || `Line ${index + 1}`);
+    }
+  }
+
+  return { matched, missing };
+};
+
+const pendingInstrumentReason = (missing = []) =>
+  `Pending: ERPNext item name not found in local instruments. Missing item${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`;
+
 const upsertErpInvoice = async (invoice) => {
   const invoiceNumber = cleanInvoiceNumber(invoice.invoiceNumber || invoice.id);
   if (!invoiceNumber) return { skipped: true, reason: 'Missing invoice number' };
+  const items = invoice.items || [];
+  const { matched, missing } = await resolveInvoiceInstruments(items);
 
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const customer = await findOrCreateCustomer(tx, invoice);
     const issueDate = parseDate(invoice.invoiceDate || invoice.poDate);
+    const pendingReason = missing.length ? pendingInstrumentReason(missing) : '';
     const invoiceRecord = await tx.invoice.upsert({
       where: { invoiceNumber },
       update: {
@@ -82,7 +154,7 @@ const upsertErpInvoice = async (invoice) => {
         issueDate,
         calibrationDate: parseDate(invoice.poDate || invoice.invoiceDate, issueDate),
         amount: invoice.amount,
-        status: invoice.status || 'Submitted',
+        status: pendingReason ? 'pending' : invoice.status || 'Submitted',
       },
       create: {
         invoiceNumber,
@@ -90,7 +162,7 @@ const upsertErpInvoice = async (invoice) => {
         issueDate,
         calibrationDate: parseDate(invoice.poDate || invoice.invoiceDate, issueDate),
         amount: invoice.amount,
-        status: invoice.status || 'Submitted',
+        status: pendingReason ? 'pending' : invoice.status || 'Submitted',
       },
     });
 
@@ -102,12 +174,13 @@ const upsertErpInvoice = async (invoice) => {
       customerId: customer.id,
       invoiceId: invoiceRecord.id,
       issueDate,
-      status: 'issued',
+      status: pendingReason ? 'pending' : 'issued',
       poNumber: invoice.poNumber || '',
       tcDate: issueDate,
       items: JSON.stringify(reportItems),
-      notes:
+      notes: pendingReason ||
         'This is to certify that the material has been checked for Visual, Dimensional and Performance tests and found within accuracy.',
+      customRemark: pendingReason,
       legalDisclaimer:
         'We confirm the specifications and performance for a period of 12 months from the date of commissioning or 18 months from the date of dispatch, whichever is earlier, for manufacturing defects only. We reserve the right of repair or to replace the defective material in parts or in full depending upon the nature of the defect & observation. Furthermore, all warranties cease to apply if the instruction manual is not followed.',
     };
@@ -125,10 +198,36 @@ const upsertErpInvoice = async (invoice) => {
 
     return {
       skipped: false,
+      pending: Boolean(pendingReason),
+      reason: pendingReason,
+      missingItems: missing,
       invoice: invoiceRecord,
       report,
     };
   });
+
+  if (result.pending) {
+    return {
+      ...result,
+      calibrationReports: [],
+    };
+  }
+
+  const calibrationReports = [];
+
+  for (const match of matched) {
+    const reports = await buildCalibrationReportsFromErpItem({
+      sourceReportId: result.report.id,
+      itemIndex: match.itemIndex,
+      instrumentId: match.instrument.id,
+    });
+    calibrationReports.push(...reports);
+  }
+
+  return {
+    ...result,
+    calibrationReports,
+  };
 };
 
 export const getErpNextPurchaseOrders = async (req, res) => {
@@ -173,7 +272,7 @@ export const runErpNextInvoiceSync = async ({ limit = 50, includeIntegrated = fa
   for (const invoice of data.purchaseOrders) {
     const result = await upsertErpInvoice(invoice);
 
-    if (!result.skipped) {
+    if (!result.skipped && !result.pending) {
       try {
         await markInvoiceIntegrated(invoice.invoiceNumber || invoice.id);
         result.acknowledged = true;
@@ -182,6 +281,9 @@ export const runErpNextInvoiceSync = async ({ limit = 50, includeIntegrated = fa
         result.acknowledgmentError = error.message;
         logger.error(`ERPNext acknowledgment failed for ${invoice.invoiceNumber || invoice.id}:`, error);
       }
+    } else if (result.pending) {
+      result.acknowledged = false;
+      result.acknowledgmentError = result.reason;
     }
 
     results.push(result);
@@ -195,6 +297,8 @@ export const runErpNextInvoiceSync = async ({ limit = 50, includeIntegrated = fa
   return {
     fetched: data.count,
     saved: saved.length,
+    pending: saved.filter((result) => result.pending).length,
+    calibrationReports: saved.reduce((sum, result) => sum + (result.calibrationReports?.length || 0), 0),
     acknowledged: acknowledged.length,
     acknowledgmentFailed: acknowledgmentFailed.length,
     skipped: skipped.length,
@@ -238,11 +342,18 @@ export const getErpNextCalibrationSources = async (_req, res) => {
 
 export const createErpNextCalibrationReport = async (req, res) => {
   try {
-    const report = await buildCalibrationReportFromErpItem({
+    const hasUnitIndex = Object.prototype.hasOwnProperty.call(req.body || {}, 'unitIndex');
+    const payload = {
       sourceReportId: req.body?.sourceReportId,
       itemIndex: req.body?.itemIndex || 0,
       instrumentId: req.body?.instrumentId,
-    });
+    };
+    const report = hasUnitIndex
+      ? await buildCalibrationReportFromErpItem({
+          ...payload,
+          unitIndex: req.body?.unitIndex || 0,
+        })
+      : await buildCalibrationReportsFromErpItem(payload);
 
     res.status(201).json(report);
   } catch (error) {
