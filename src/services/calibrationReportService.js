@@ -769,14 +769,22 @@ const itemQuantity = (item) => {
   return Number.isFinite(numeric) && numeric > 0 ? Math.max(1, Math.floor(numeric)) : 1;
 };
 
-const buildCertificateNo = (invoiceNumber, instrument, itemIndex = 0, unitIndex = 0) =>
+const runningCertificateNumber = (items = [], itemIndex = 0, unitIndex = 0) => {
+  const resolvedItemIndex = Math.max(0, Number(itemIndex) || 0);
+  const previousUnits = items
+    .slice(0, resolvedItemIndex)
+    .reduce((total, currentItem) => total + itemQuantity(currentItem), 0);
+
+  return previousUnits + Math.max(0, Number(unitIndex) || 0) + 1;
+};
+
+const buildCertificateNo = (invoiceNumber, runningNumber = 1) =>
   [
-    'CAL',
-    String(invoiceNumber || 'ERP').replace(/[^\w-]+/g, '-'),
-    `L${Number(itemIndex) + 1}`,
-    `U${Number(unitIndex) + 1}`,
-    instrument.id,
-  ].join('-');
+    'SANC',
+    'CC',
+    String(invoiceNumber || 'ERP').trim() || 'ERP',
+    String(Math.max(1, Number(runningNumber) || 1)).padStart(4, '0'),
+  ].join('/');
 
 export const getCalibrationSourceReports = async () =>
   prisma.report.findMany({
@@ -838,13 +846,10 @@ export const buildCalibrationReportFromErpItem = async ({
 
   const quantity = itemQuantity(item);
   const normalizedUnitIndex = Math.max(0, Math.min(Number(unitIndex) || 0, quantity - 1));
+  const runningNumber = runningCertificateNumber(items, itemIndex, normalizedUnitIndex);
   const certificateNo = buildCertificateNo(
     sourceReport.invoice?.invoiceNumber || sourceReport.tcNumber,
-    {
-      id: resolvedInstrument.__fallbackTemplate ? `ERP-${sourceReport.id}` : resolvedInstrument.id,
-    },
-    itemIndex,
-    normalizedUnitIndex
+    runningNumber
   );
   const refStandards = buildReportStandards(resolvedInstrument);
   const reportData = {

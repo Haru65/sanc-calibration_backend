@@ -24,6 +24,24 @@ const authSchemeAttempts = (authScheme = 'basic') => {
   return authScheme === 'token' ? ['token', 'basic'] : ['basic', 'token'];
 };
 
+const erpFetchError = (error, url) => {
+  if (error?.name === 'AbortError') {
+    return new Error(`ERPNext request timed out after ${process.env.ERPNEXT_TIMEOUT_MS || 12000} ms: ${url}`);
+  }
+
+  const cause = error?.cause;
+  const details = [
+    error?.message,
+    cause?.code,
+    cause?.hostname,
+    cause?.address,
+    cause?.port,
+  ].filter(Boolean).join(' ');
+  const nextError = new Error(`ERPNext network request failed: ${url}${details ? ` (${details})` : ''}`);
+  nextError.cause = error;
+  return nextError;
+};
+
 const erpFetch = async (path, options = {}) => {
   const config = getErpConfig();
   const attempts = authSchemeAttempts(config.authScheme);
@@ -39,9 +57,10 @@ const erpFetch = async (path, options = {}) => {
   for (const authScheme of attempts) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Number(process.env.ERPNEXT_TIMEOUT_MS || 12000));
+    const url = `${config.baseUrl}${path}`;
 
     try {
-      const response = await fetch(`${config.baseUrl}${path}`, {
+      const response = await fetch(url, {
         ...options,
         signal: controller.signal,
         headers: {
@@ -77,6 +96,9 @@ const erpFetch = async (path, options = {}) => {
       }
 
       return { response, payload };
+    } catch (error) {
+      if (error?.statusCode || error?.payload) throw error;
+      throw erpFetchError(error, url);
     } finally {
       clearTimeout(timeout);
     }

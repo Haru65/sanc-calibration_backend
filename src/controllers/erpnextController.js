@@ -36,6 +36,39 @@ const normalizeDeviceName = (value) =>
 const erpItemName = (item = {}) =>
   item.itemName || item.name || item.description || item.itemCode || '';
 
+const normalizedValues = (values = []) =>
+  values
+    .map((value) => normalizeDeviceName(value))
+    .filter(Boolean);
+
+const erpItemSearchValues = (item = {}) =>
+  normalizedValues([
+    item.itemCode,
+    item.model,
+    item.serialNumber,
+    item.itemName,
+    item.name,
+    item.title,
+    item.description,
+    item.make,
+  ]);
+
+const erpItemSearchText = (item = {}) => erpItemSearchValues(item).join(' ');
+
+const normalizedInstrument = (instrument) => ({
+  ...instrument,
+  normalizedName: normalizeDeviceName(instrument.name),
+  normalizedModel: normalizeDeviceName(instrument.model),
+  normalizedSerial: normalizeDeviceName(instrument.serial),
+  normalizedInstrumentId: normalizeDeviceName(instrument.instrumentId),
+  normalizedMake: normalizeDeviceName(instrument.make),
+  normalizedCategory: normalizeDeviceName(instrument.category),
+  normalizedDescription: normalizeDeviceName(instrument.description),
+});
+
+const includesSearchText = (searchText, value, minLength = 3) =>
+  value && value.length >= minLength && searchText.includes(value);
+
 const buildReportItems = (items = []) =>
   items.map((item, index) => ({
     sr: index + 1,
@@ -80,31 +113,47 @@ const findOrCreateCustomer = async (db, invoice) => {
   return db.customer.create({ data });
 };
 
-const findInstrumentByItemName = async (item) => {
-  const itemName = normalizeDeviceName(erpItemName(item));
-  if (!itemName) return null;
+const findInstrumentByErpItem = async (item) => {
+  const itemValues = erpItemSearchValues(item);
+  const itemText = itemValues.join(' ');
+  const itemIdentifiers = normalizedValues([item.itemCode, item.model, item.serialNumber]);
+
+  if (!itemText) return null;
 
   const instruments = await prisma.instrument.findMany({
     where: { ignored: false },
     select: {
       id: true,
       name: true,
+      model: true,
+      serial: true,
+      instrumentId: true,
+      make: true,
+      category: true,
+      description: true,
     },
   });
 
   const candidates = instruments
-    .map((instrument) => ({
-      ...instrument,
-      normalizedName: normalizeDeviceName(instrument.name),
-    }))
-    .filter((instrument) => instrument.normalizedName);
+    .map(normalizedInstrument)
+    .filter((instrument) =>
+      instrument.normalizedName ||
+      instrument.normalizedModel ||
+      instrument.normalizedSerial ||
+      instrument.normalizedInstrumentId
+    );
 
   return (
-    candidates.find((instrument) => instrument.normalizedName === itemName) ||
+    candidates.find((instrument) => itemIdentifiers.includes(instrument.normalizedModel)) ||
+    candidates.find((instrument) => itemIdentifiers.includes(instrument.normalizedInstrumentId)) ||
+    candidates.find((instrument) => itemIdentifiers.includes(instrument.normalizedSerial)) ||
+    candidates.find((instrument) => itemValues.includes(instrument.normalizedName)) ||
+    candidates.find((instrument) => includesSearchText(itemText, instrument.normalizedModel)) ||
+    candidates.find((instrument) => includesSearchText(itemText, instrument.normalizedInstrumentId)) ||
+    candidates.find((instrument) => includesSearchText(itemText, instrument.normalizedName)) ||
     candidates.find((instrument) =>
-      itemName.length >= 3 &&
-      instrument.normalizedName.length >= 3 &&
-      (itemName.includes(instrument.normalizedName) || instrument.normalizedName.includes(itemName))
+      includesSearchText(itemText, instrument.normalizedCategory) &&
+      includesSearchText(itemText, instrument.normalizedMake)
     ) ||
     null
   );
@@ -122,7 +171,7 @@ const resolveInvoiceInstruments = async (items = []) => {
   const missing = [];
 
   for (const [index, item] of items.entries()) {
-    const instrument = await findInstrumentByItemName(item);
+    const instrument = await findInstrumentByErpItem(item);
 
     if (instrument) {
       matched.push({ itemIndex: index, instrument });
@@ -135,7 +184,7 @@ const resolveInvoiceInstruments = async (items = []) => {
 };
 
 const pendingInstrumentReason = (missing = []) =>
-  `Pending: ERPNext item name not found in local instruments. Missing item${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`;
+  `Pending: ERPNext item not found in local instruments by name, model, code, or serial. Missing item${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`;
 
 const upsertErpInvoice = async (invoice) => {
   const invoiceNumber = cleanInvoiceNumber(invoice.invoiceNumber || invoice.id);
@@ -230,6 +279,47 @@ const upsertErpInvoice = async (invoice) => {
   };
 };
 
+const acknowledgeProcessedInvoice = async (invoice, result) => {
+  if (!result.skipped && !result.pending) {
+    try {
+      await markInvoiceIntegrated(invoice.invoiceNumber || invoice.id);
+      result.acknowledged = true;
+    } catch (error) {
+      result.acknowledged = false;
+      result.acknowledgmentError = error.message;
+      logger.error(`ERPNext acknowledgment failed for ${invoice.invoiceNumber || invoice.id}:`, error);
+    }
+  } else if (result.pending) {
+    result.acknowledged = false;
+    result.acknowledgmentError = result.reason;
+  }
+
+  return result;
+};
+
+const summarizeSyncResults = (results, fetched) => {
+  const saved = results.filter((result) => !result.skipped);
+  const skipped = results.filter((result) => result.skipped);
+  const acknowledged = saved.filter((result) => result.acknowledged);
+  const acknowledgmentFailed = saved.filter((result) => !result.acknowledged);
+
+  return {
+    fetched,
+    saved: saved.length,
+    pending: saved.filter((result) => result.pending).length,
+    calibrationReports: saved.reduce((sum, result) => sum + (result.calibrationReports?.length || 0), 0),
+    acknowledged: acknowledged.length,
+    acknowledgmentFailed: acknowledgmentFailed.length,
+    skipped: skipped.length,
+    reports: saved.map((result) => result.report),
+    acknowledgmentErrors: acknowledgmentFailed.map((result) => ({
+      invoiceNumber: result.invoice?.invoiceNumber,
+      error: result.acknowledgmentError,
+    })),
+    skippedItems: skipped,
+  };
+};
+
 export const getErpNextPurchaseOrders = async (req, res) => {
   try {
     const started = Date.now();
@@ -271,43 +361,97 @@ export const runErpNextInvoiceSync = async ({ limit = 50, includeIntegrated = fa
 
   for (const invoice of data.purchaseOrders) {
     const result = await upsertErpInvoice(invoice);
-
-    if (!result.skipped && !result.pending) {
-      try {
-        await markInvoiceIntegrated(invoice.invoiceNumber || invoice.id);
-        result.acknowledged = true;
-      } catch (error) {
-        result.acknowledged = false;
-        result.acknowledgmentError = error.message;
-        logger.error(`ERPNext acknowledgment failed for ${invoice.invoiceNumber || invoice.id}:`, error);
-      }
-    } else if (result.pending) {
-      result.acknowledged = false;
-      result.acknowledgmentError = result.reason;
-    }
-
-    results.push(result);
+    results.push(await acknowledgeProcessedInvoice(invoice, result));
   }
 
-  const saved = results.filter((result) => !result.skipped);
-  const skipped = results.filter((result) => result.skipped);
-  const acknowledged = saved.filter((result) => result.acknowledged);
-  const acknowledgmentFailed = saved.filter((result) => !result.acknowledged);
+  return summarizeSyncResults(results, data.count);
+};
+
+export const reprocessPendingErpNextInvoices = async ({ limit = 500, dryRun = false } = {}) => {
+  const [pendingInvoices, pendingReports] = await Promise.all([
+    prisma.invoice.findMany({
+      where: { status: { equals: 'pending', mode: 'insensitive' } },
+      select: { invoiceNumber: true },
+    }),
+    prisma.report.findMany({
+      where: {
+        type: 'test',
+        OR: [
+          { status: { equals: 'pending', mode: 'insensitive' } },
+          { customRemark: { contains: 'Pending:', mode: 'insensitive' } },
+          { notes: { contains: 'Pending:', mode: 'insensitive' } },
+        ],
+      },
+      select: {
+        certificateNo: true,
+        tcNumber: true,
+        invoice: { select: { invoiceNumber: true } },
+      },
+    }),
+  ]);
+
+  const pendingNumbers = new Set([
+    ...pendingInvoices.map((invoice) => invoice.invoiceNumber),
+    ...pendingReports.flatMap((report) => [
+      report.invoice?.invoiceNumber,
+      report.tcNumber,
+      report.certificateNo,
+    ]),
+  ].map(cleanInvoiceNumber).filter(Boolean));
+
+  if (!pendingNumbers.size) {
+    return {
+      fetched: 0,
+      matchedPending: 0,
+      missingFromErpNext: [],
+      ...summarizeSyncResults([], 0),
+    };
+  }
+
+  const data = await getRecentSubmittedInvoices({ limit });
+  const erpInvoicesByNumber = new Map(
+    data.purchaseOrders
+      .map((invoice) => [cleanInvoiceNumber(invoice.invoiceNumber || invoice.id), invoice])
+      .filter(([invoiceNumber]) => invoiceNumber)
+  );
+  const matchedInvoices = [...pendingNumbers]
+    .map((invoiceNumber) => erpInvoicesByNumber.get(invoiceNumber))
+    .filter(Boolean);
+
+  if (dryRun) {
+    const checks = [];
+
+    for (const invoice of matchedInvoices) {
+      const { matched, missing } = await resolveInvoiceInstruments(invoice.items || []);
+      checks.push({
+        invoiceNumber: cleanInvoiceNumber(invoice.invoiceNumber || invoice.id),
+        matchedItems: matched.length,
+        missingItems: missing,
+        canRepair: missing.length === 0,
+      });
+    }
+
+    return {
+      fetched: data.count,
+      matchedPending: matchedInvoices.length,
+      missingFromErpNext: [...pendingNumbers].filter((invoiceNumber) => !erpInvoicesByNumber.has(invoiceNumber)),
+      dryRun: true,
+      checks,
+      ...summarizeSyncResults([], data.count),
+    };
+  }
+
+  const results = [];
+
+  for (const invoice of matchedInvoices) {
+    const result = await upsertErpInvoice(invoice);
+    results.push(await acknowledgeProcessedInvoice(invoice, result));
+  }
 
   return {
-    fetched: data.count,
-    saved: saved.length,
-    pending: saved.filter((result) => result.pending).length,
-    calibrationReports: saved.reduce((sum, result) => sum + (result.calibrationReports?.length || 0), 0),
-    acknowledged: acknowledged.length,
-    acknowledgmentFailed: acknowledgmentFailed.length,
-    skipped: skipped.length,
-    reports: saved.map((result) => result.report),
-    acknowledgmentErrors: acknowledgmentFailed.map((result) => ({
-      invoiceNumber: result.invoice?.invoiceNumber,
-      error: result.acknowledgmentError,
-    })),
-    skippedItems: skipped,
+    matchedPending: matchedInvoices.length,
+    missingFromErpNext: [...pendingNumbers].filter((invoiceNumber) => !erpInvoicesByNumber.has(invoiceNumber)),
+    ...summarizeSyncResults(results, data.count),
   };
 };
 
