@@ -36,22 +36,64 @@ const normalizeDeviceName = (value) =>
 const erpItemName = (item = {}) =>
   item.itemName || item.name || item.description || item.itemCode || '';
 
+const itemQuantity = (item = {}) => {
+  const numeric = Number(String(item.quantity ?? item.qty ?? 1).match(/\d+(?:\.\d+)?/)?.[0]);
+  return Number.isFinite(numeric) && numeric > 0 ? Math.max(1, Math.floor(numeric)) : 1;
+};
+
+const splitErpItemName = (item = {}) => {
+  const itemName = String(item.itemName || '').trim();
+  if (!itemName.includes(',')) return [itemName].filter(Boolean);
+
+  return itemName
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+};
+
+const expandInvoiceDevices = (items = []) =>
+  items.flatMap((item, sourceItemIndex) => {
+    const splitNames = splitErpItemName(item);
+    const deviceNames = splitNames.length ? splitNames : [erpItemName(item) || `Line ${sourceItemIndex + 1}`];
+    const isSplitItem = deviceNames.length > 1;
+
+    return deviceNames.map((deviceName, sourceDeviceIndex) => ({
+      ...item,
+      itemName: deviceName,
+      name: deviceName,
+      title: deviceName,
+      quantity: isSplitItem ? 1 : item.quantity,
+      splitFromItemName: isSplitItem,
+      sourceItemIndex,
+      sourceDeviceIndex,
+      sourceItemName: item.itemName || '',
+    }));
+  });
+
 const normalizedValues = (values = []) =>
   values
     .map((value) => normalizeDeviceName(value))
     .filter(Boolean);
 
 const erpItemSearchValues = (item = {}) =>
-  normalizedValues([
-    item.itemCode,
-    item.model,
-    item.serialNumber,
-    item.itemName,
-    item.name,
-    item.title,
-    item.description,
-    item.make,
-  ]);
+  normalizedValues(
+    item.splitFromItemName
+      ? [
+          item.itemName,
+          item.name,
+          item.title,
+        ]
+      : [
+          item.itemCode,
+          item.model,
+          item.serialNumber,
+          item.itemName,
+          item.name,
+          item.title,
+          item.description,
+          item.make,
+        ]
+  );
 
 const erpItemSearchText = (item = {}) => erpItemSearchValues(item).join(' ');
 
@@ -69,18 +111,23 @@ const normalizedInstrument = (instrument) => ({
 const includesSearchText = (searchText, value, minLength = 3) =>
   value && value.length >= minLength && searchText.includes(value);
 
-const buildReportItems = (items = []) =>
-  items.map((item, index) => ({
+const buildReportItems = (resolvedDevices = []) =>
+  resolvedDevices.map((device, index) => ({
     sr: index + 1,
-    name: item.itemName || item.description || item.itemCode || 'Instrument',
-    qty: item.quantity || 1,
+    name: device.itemName || device.description || device.itemCode || 'Instrument',
+    qty: itemQuantity(device),
+    matched: Boolean(device.instrument),
+    missing: !device.instrument,
+    instrumentId: device.instrument?.id || null,
+    sourceItemIndex: device.sourceItemIndex,
+    sourceDeviceIndex: device.sourceDeviceIndex,
     specs: compactSpecs([
-      { key: 'ITEM CODE', value: item.itemCode },
-      { key: 'MAKE', value: item.make },
-      { key: 'MODEL', value: item.model },
-      { key: 'RANGE', value: item.range },
-      { key: 'ACCURACY', value: item.accuracy },
-      { key: 'SERIAL NO', value: item.serialNumber },
+      { key: 'ITEM CODE', value: device.itemCode },
+      { key: 'MAKE', value: device.make },
+      { key: 'MODEL', value: device.model },
+      { key: 'RANGE', value: device.range },
+      { key: 'ACCURACY', value: device.accuracy },
+      { key: 'SERIAL NO', value: device.serialNumber },
     ]),
   }));
 
@@ -116,7 +163,11 @@ const findOrCreateCustomer = async (db, invoice) => {
 const findInstrumentByErpItem = async (item) => {
   const itemValues = erpItemSearchValues(item);
   const itemText = itemValues.join(' ');
-  const itemIdentifiers = normalizedValues([item.itemCode, item.model, item.serialNumber]);
+  const itemIdentifiers = normalizedValues(
+    item.splitFromItemName
+      ? [item.itemName, item.name, item.title]
+      : [item.itemCode, item.model, item.serialNumber]
+  );
 
   if (!itemText) return null;
 
@@ -160,42 +211,67 @@ const findInstrumentByErpItem = async (item) => {
 };
 
 const resolveInvoiceInstruments = async (items = []) => {
-  if (!items.length) {
+  const devices = expandInvoiceDevices(items);
+
+  if (!devices.length) {
     return {
       matched: [],
-      missing: ['No ERPNext invoice items found'],
+      missing: [{ name: 'No ERPNext invoice items found', quantity: 1 }],
+      devices: [],
+      totalDevices: 0,
+      matchedDevices: 0,
+      missingDevices: 1,
     };
   }
 
   const matched = [];
   const missing = [];
+  const resolvedDevices = [];
 
-  for (const [index, item] of items.entries()) {
-    const instrument = await findInstrumentByErpItem(item);
+  for (const [index, device] of devices.entries()) {
+    const instrument = await findInstrumentByErpItem(device);
+    const resolvedDevice = { ...device, reportItemIndex: index, instrument };
+    resolvedDevices.push(resolvedDevice);
 
     if (instrument) {
-      matched.push({ itemIndex: index, instrument });
+      matched.push({ itemIndex: index, instrument, item: resolvedDevice });
     } else {
-      missing.push(erpItemName(item) || `Line ${index + 1}`);
+      missing.push({
+        name: erpItemName(device) || `Line ${index + 1}`,
+        quantity: itemQuantity(device),
+      });
     }
   }
 
-  return { matched, missing };
+  return {
+    matched,
+    missing,
+    devices: resolvedDevices,
+    totalDevices: resolvedDevices.reduce((sum, device) => sum + itemQuantity(device), 0),
+    matchedDevices: matched.reduce((sum, match) => sum + itemQuantity(match.item), 0),
+    missingDevices: missing.reduce((sum, item) => sum + item.quantity, 0),
+  };
 };
 
-const pendingInstrumentReason = (missing = []) =>
-  `Pending: ERPNext item not found in local instruments by name, model, code, or serial. Missing item${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`;
+const pendingInstrumentReason = ({ matchedDevices = 0, totalDevices = 0, missing = [] } = {}) => {
+  const names = missing.map((item) => item.name).join(', ');
+  const missingDevices = missing.reduce((sum, item) => sum + item.quantity, 0);
+  return `Pending: ${matchedDevices}/${totalDevices || matchedDevices + missingDevices} devices found. ${missingDevices} pending, can't find: ${names}`;
+};
 
 const upsertErpInvoice = async (invoice) => {
   const invoiceNumber = cleanInvoiceNumber(invoice.invoiceNumber || invoice.id);
   if (!invoiceNumber) return { skipped: true, reason: 'Missing invoice number' };
   const items = invoice.items || [];
-  const { matched, missing } = await resolveInvoiceInstruments(items);
+  const resolved = await resolveInvoiceInstruments(items);
+  const { matched, missing, devices, totalDevices, matchedDevices, missingDevices } = resolved;
 
   const result = await prisma.$transaction(async (tx) => {
     const customer = await findOrCreateCustomer(tx, invoice);
     const issueDate = parseDate(invoice.invoiceDate || invoice.poDate);
-    const pendingReason = missing.length ? pendingInstrumentReason(missing) : '';
+    const pendingReason = missing.length
+      ? pendingInstrumentReason({ matchedDevices, totalDevices, missing })
+      : '';
     const invoiceRecord = await tx.invoice.upsert({
       where: { invoiceNumber },
       update: {
@@ -215,7 +291,7 @@ const upsertErpInvoice = async (invoice) => {
       },
     });
 
-    const reportItems = buildReportItems(invoice.items || []);
+    const reportItems = buildReportItems(devices);
     const reportData = {
       type: 'test',
       certificateNo: invoiceNumber,
@@ -249,18 +325,14 @@ const upsertErpInvoice = async (invoice) => {
       skipped: false,
       pending: Boolean(pendingReason),
       reason: pendingReason,
-      missingItems: missing,
+      missingItems: missing.map((item) => item.name),
+      totalDevices,
+      matchedDevices,
+      missingDevices,
       invoice: invoiceRecord,
       report,
     };
   });
-
-  if (result.pending) {
-    return {
-      ...result,
-      calibrationReports: [],
-    };
-  }
 
   const calibrationReports = [];
 
@@ -422,11 +494,15 @@ export const reprocessPendingErpNextInvoices = async ({ limit = 500, dryRun = fa
     const checks = [];
 
     for (const invoice of matchedInvoices) {
-      const { matched, missing } = await resolveInvoiceInstruments(invoice.items || []);
+      const { matched, missing, totalDevices, matchedDevices, missingDevices } =
+        await resolveInvoiceInstruments(invoice.items || []);
       checks.push({
         invoiceNumber: cleanInvoiceNumber(invoice.invoiceNumber || invoice.id),
         matchedItems: matched.length,
-        missingItems: missing,
+        totalDevices,
+        matchedDevices,
+        missingDevices,
+        missingItems: missing.map((item) => item.name),
         canRepair: missing.length === 0,
       });
     }

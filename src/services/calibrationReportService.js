@@ -829,6 +829,12 @@ export const buildCalibrationReportFromErpItem = async ({
     throw error;
   }
 
+  if (item.missing || item.matched === false) {
+    const error = new Error('Selected ERPNext item is not available in local instruments');
+    error.statusCode = 409;
+    throw error;
+  }
+
   const instrument = await findInstrumentForItem(item, instrumentId);
   const resolvedInstrument = instrument || await buildFallbackInstrumentFromItem(item);
 
