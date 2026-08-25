@@ -111,23 +111,38 @@ const normalizedInstrument = (instrument) => ({
 const includesSearchText = (searchText, value, minLength = 3) =>
   value && value.length >= minLength && searchText.includes(value);
 
+const instrumentRange = (instrument) => {
+  if (!instrument) return '';
+
+  const start = instrument.rangeStart;
+  const end = instrument.rangeEnd;
+  const unit = instrument.rangeUnit || '';
+
+  if (start !== undefined && start !== null && end !== undefined && end !== null) {
+    return `${start} to ${end}${unit ? ` ${unit}` : ''}`;
+  }
+
+  return '';
+};
+
 const buildReportItems = (resolvedDevices = []) =>
   resolvedDevices.map((device, index) => ({
     sr: index + 1,
-    name: device.itemName || device.description || device.itemCode || 'Instrument',
+    name: device.itemName || device.instrument?.name || device.description || device.itemCode || 'Instrument',
     qty: itemQuantity(device),
     matched: Boolean(device.instrument),
     missing: !device.instrument,
     instrumentId: device.instrument?.id || null,
+    instrumentDescription: device.instrument?.description || '',
     sourceItemIndex: device.sourceItemIndex,
     sourceDeviceIndex: device.sourceDeviceIndex,
     specs: compactSpecs([
       { key: 'ITEM CODE', value: device.itemCode },
-      { key: 'MAKE', value: device.make },
-      { key: 'MODEL', value: device.model },
-      { key: 'RANGE', value: device.range },
-      { key: 'ACCURACY', value: device.accuracy },
-      { key: 'SERIAL NO', value: device.serialNumber },
+      { key: 'MAKE', value: device.make || device.instrument?.make },
+      { key: 'MODEL', value: device.model || device.instrument?.model },
+      { key: 'RANGE', value: device.range || instrumentRange(device.instrument) },
+      { key: 'ACCURACY', value: device.accuracy || device.instrument?.accuracy },
+      { key: 'SERIAL NO', value: device.serialNumber || device.instrument?.serial },
     ]),
   }));
 
@@ -182,6 +197,10 @@ const findInstrumentByErpItem = async (item) => {
       make: true,
       category: true,
       description: true,
+      rangeStart: true,
+      rangeEnd: true,
+      rangeUnit: true,
+      accuracy: true,
     },
   });
 
