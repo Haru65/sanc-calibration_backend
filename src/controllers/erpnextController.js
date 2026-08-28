@@ -36,9 +36,11 @@ const normalizeDeviceName = (value) =>
 const erpItemName = (item = {}) =>
   item.itemName || item.name || item.description || item.itemCode || '';
 
-const itemQuantity = (item = {}) => {
-  const numeric = Number(String(item.quantity ?? item.qty ?? 1).match(/\d+(?:\.\d+)?/)?.[0]);
-  return Number.isFinite(numeric) && numeric > 0 ? Math.max(1, Math.floor(numeric)) : 1;
+const deviceCount = (items = []) => items.length;
+
+const displayQuantity = (item = {}) => {
+  const value = item.quantity ?? item.qty;
+  return value === undefined || value === null || value === '' ? 1 : value;
 };
 
 const splitErpItemName = (item = {}) => {
@@ -75,8 +77,17 @@ const normalizedValues = (values = []) =>
     .map((value) => normalizeDeviceName(value))
     .filter(Boolean);
 
+const exactModelValues = (values = []) =>
+  normalizedValues([
+    ...values,
+    ...values
+      .filter(Boolean)
+      .flatMap((value) => String(value).split(/[\s,;|()[\]{}]+/))
+      .filter((value) => /[0-9]/.test(value) && /[a-z-]/i.test(value)),
+  ]);
+
 const erpItemSearchValues = (item = {}) =>
-  normalizedValues(
+  exactModelValues(
     item.splitFromItemName
       ? [
           item.itemName,
@@ -90,12 +101,8 @@ const erpItemSearchValues = (item = {}) =>
           item.itemName,
           item.name,
           item.title,
-          item.description,
-          item.make,
         ]
   );
-
-const erpItemSearchText = (item = {}) => erpItemSearchValues(item).join(' ');
 
 const normalizedInstrument = (instrument) => ({
   ...instrument,
@@ -107,9 +114,6 @@ const normalizedInstrument = (instrument) => ({
   normalizedCategory: normalizeDeviceName(instrument.category),
   normalizedDescription: normalizeDeviceName(instrument.description),
 });
-
-const includesSearchText = (searchText, value, minLength = 3) =>
-  value && value.length >= minLength && searchText.includes(value);
 
 const instrumentRange = (instrument) => {
   if (!instrument) return '';
@@ -129,7 +133,7 @@ const buildReportItems = (resolvedDevices = []) =>
   resolvedDevices.map((device, index) => ({
     sr: index + 1,
     name: device.itemName || device.instrument?.name || device.description || device.itemCode || 'Instrument',
-    qty: itemQuantity(device),
+    qty: displayQuantity(device),
     matched: Boolean(device.instrument),
     missing: !device.instrument,
     instrumentId: device.instrument?.id || null,
@@ -177,14 +181,13 @@ const findOrCreateCustomer = async (db, invoice) => {
 
 const findInstrumentByErpItem = async (item) => {
   const itemValues = erpItemSearchValues(item);
-  const itemText = itemValues.join(' ');
   const itemIdentifiers = normalizedValues(
     item.splitFromItemName
       ? [item.itemName, item.name, item.title]
       : [item.itemCode, item.model, item.serialNumber]
   );
 
-  if (!itemText) return null;
+  if (!itemValues.length && !itemIdentifiers.length) return null;
 
   const instruments = await prisma.instrument.findMany({
     where: { ignored: false },
@@ -214,16 +217,12 @@ const findInstrumentByErpItem = async (item) => {
     );
 
   return (
-    candidates.find((instrument) => itemIdentifiers.includes(instrument.normalizedModel)) ||
+    candidates.find((instrument) => itemValues.includes(instrument.normalizedModel)) ||
     candidates.find((instrument) => itemIdentifiers.includes(instrument.normalizedInstrumentId)) ||
-    candidates.find((instrument) => itemIdentifiers.includes(instrument.normalizedSerial)) ||
-    candidates.find((instrument) => itemValues.includes(instrument.normalizedName)) ||
-    candidates.find((instrument) => includesSearchText(itemText, instrument.normalizedModel)) ||
-    candidates.find((instrument) => includesSearchText(itemText, instrument.normalizedInstrumentId)) ||
-    candidates.find((instrument) => includesSearchText(itemText, instrument.normalizedName)) ||
     candidates.find((instrument) =>
-      includesSearchText(itemText, instrument.normalizedCategory) &&
-      includesSearchText(itemText, instrument.normalizedMake)
+      instrument.normalizedSerial &&
+      instrument.normalizedSerial.length >= 4 &&
+      itemIdentifiers.includes(instrument.normalizedSerial)
     ) ||
     null
   );
@@ -235,7 +234,7 @@ const resolveInvoiceInstruments = async (items = []) => {
   if (!devices.length) {
     return {
       matched: [],
-      missing: [{ name: 'No ERPNext invoice items found', quantity: 1 }],
+      missing: [{ name: 'No ERPNext invoice items found' }],
       devices: [],
       totalDevices: 0,
       matchedDevices: 0,
@@ -257,7 +256,6 @@ const resolveInvoiceInstruments = async (items = []) => {
     } else {
       missing.push({
         name: erpItemName(device) || `Line ${index + 1}`,
-        quantity: itemQuantity(device),
       });
     }
   }
@@ -266,15 +264,15 @@ const resolveInvoiceInstruments = async (items = []) => {
     matched,
     missing,
     devices: resolvedDevices,
-    totalDevices: resolvedDevices.reduce((sum, device) => sum + itemQuantity(device), 0),
-    matchedDevices: matched.reduce((sum, match) => sum + itemQuantity(match.item), 0),
-    missingDevices: missing.reduce((sum, item) => sum + item.quantity, 0),
+    totalDevices: deviceCount(resolvedDevices),
+    matchedDevices: deviceCount(matched),
+    missingDevices: deviceCount(missing),
   };
 };
 
 const pendingInstrumentReason = ({ matchedDevices = 0, totalDevices = 0, missing = [] } = {}) => {
   const names = missing.map((item) => item.name).join(', ');
-  const missingDevices = missing.reduce((sum, item) => sum + item.quantity, 0);
+  const missingDevices = deviceCount(missing);
   return `Pending: ${matchedDevices}/${totalDevices || matchedDevices + missingDevices} devices found. ${missingDevices} pending, can't find: ${names}`;
 };
 

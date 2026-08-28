@@ -597,42 +597,19 @@ const itemSpecValue = (item, ...keys) => {
   return match?.value || '';
 };
 
-const itemSearchText = (item) =>
-  [
-    item.name,
-    item.title,
-    item.description,
-    item.itemCode,
-    ...(Array.isArray(item.specs) ? item.specs.map((spec) => spec.value) : []),
-  ]
-    .filter(Boolean)
-    .join(' ');
+const normalizedItemValues = (values = []) =>
+  values
+    .map((value) => normalizeKey(value))
+    .filter(Boolean);
 
-const itemSearchTokens = (item) =>
-  [
-    item.model,
-    item.itemCode,
-    item.name,
-    item.title,
-    item.description,
-    itemSpecValue(item, 'model'),
-    itemSpecValue(item, 'item code'),
-    itemSpecValue(item, 'serial no', 'serial number'),
-  ]
-    .filter(Boolean)
-    .flatMap((value) => String(value).split(/\s+/))
-    .map((value) => value.trim())
-    .filter((value) => value.length >= 3)
-    .slice(0, 12);
-
-const inferCategoryFromItem = (item) => {
-  const raw = itemSearchText(item).toLowerCase();
-  if (raw.includes('humidity') || raw.includes('rh')) return 'Humidity transmitter';
-  if (raw.includes('switch')) return 'Switches';
-  if (raw.includes('transmitter') || raw.includes(' tx') || raw.includes('-tx') || raw.includes('tx ')) return 'Transmitter';
-  if (raw.includes('gauge') || raw.includes('pressure')) return 'Gauges';
-  return 'Gauges';
-};
+const exactModelValuesFrom = (values = []) =>
+  normalizedItemValues([
+    ...values,
+    ...values
+      .filter(Boolean)
+      .flatMap((value) => String(value).split(/[\s,;|()[\]{}]+/))
+      .filter((value) => /[0-9]/.test(value) && /[a-z-]/i.test(value)),
+  ]);
 
 const parseRangeSpec = (value) => {
   const matches = String(value || '').match(/-?\d+(?:\.\d+)?/g) || [];
@@ -691,34 +668,6 @@ export const buildCalculatedReadingsForReport = async (reportData = {}, existing
   return calculateReadingsPayload(baseReadings, context);
 };
 
-const buildFallbackInstrumentFromItem = async (item) => {
-  const category = inferCategoryFromItem(item);
-  const template = await prisma.instrument.findFirst({
-    where: { category: { contains: category.split(' ')[0], mode: 'insensitive' } },
-    include: { customer: true, standards: true },
-  });
-
-  if (!template) return null;
-
-  const range = parseRangeSpec(itemSpecValue(item, 'range'));
-  const itemName = item.name || item.title || item.itemName || 'ERPNext Instrument';
-  const itemModel = itemSpecValue(item, 'model') || item.itemCode || itemName;
-
-  return {
-    ...template,
-    name: itemName,
-    make: itemSpecValue(item, 'make') || template.make,
-    model: itemModel,
-    serial: itemSpecValue(item, 'serial no', 'serial number') || '',
-    category,
-    rangeStart: range.start || template.rangeStart,
-    rangeEnd: range.end || template.rangeEnd,
-    rangeUnit: range.unit || template.rangeUnit,
-    accuracy: itemSpecValue(item, 'accuracy') || template.accuracy,
-    __fallbackTemplate: true,
-  };
-};
-
 const findInstrumentForItem = async (item, instrumentId) => {
   if (instrumentId) {
     return prisma.instrument.findUnique({
@@ -727,40 +676,45 @@ const findInstrumentForItem = async (item, instrumentId) => {
     });
   }
 
-  const text = itemSearchText(item);
-  const itemName = item.name || item.title || item.itemName || '';
-  const tokens = itemSearchTokens(item);
-  const searchClauses = [];
+  const exactModelValues = exactModelValuesFrom([
+    item.model,
+    item.itemCode,
+    item.name,
+    item.title,
+    item.itemName,
+    itemSpecValue(item, 'model'),
+    itemSpecValue(item, 'item code'),
+  ]);
+  const exactInstrumentIdValues = normalizedItemValues([
+    item.itemCode,
+    itemSpecValue(item, 'item code'),
+  ]);
+  const exactSerialValues = normalizedItemValues([
+    item.serial,
+    item.serialNumber,
+    itemSpecValue(item, 'serial no', 'serial number'),
+  ]);
 
-  if (itemName.trim()) {
-    searchClauses.push({ name: { contains: itemName, mode: 'insensitive' } });
-  }
-
-  tokens.forEach((token) => {
-    searchClauses.push({ model: { contains: token, mode: 'insensitive' } });
-    searchClauses.push({ name: { contains: token, mode: 'insensitive' } });
-    searchClauses.push({ serial: { contains: token, mode: 'insensitive' } });
-    searchClauses.push({ instrumentId: { contains: token, mode: 'insensitive' } });
-  });
-
-  if (!searchClauses.length) return null;
+  if (!exactModelValues.length && !exactInstrumentIdValues.length && !exactSerialValues.length) return null;
 
   const candidates = await prisma.instrument.findMany({
-    where: {
-      OR: searchClauses,
-    },
+    where: { ignored: false },
     include: { customer: true, standards: true },
-    take: 25,
   });
 
-  const normalizedText = normalizeKey(text);
   return (
-    candidates.find((instrument) => normalizeKey(instrument.model) && normalizeKey(instrument.model) === normalizeKey(itemSpecValue(item, 'model'))) ||
-    candidates.find((instrument) => normalizeKey(instrument.serial) && normalizeKey(instrument.serial) === normalizeKey(itemSpecValue(item, 'serial no', 'serial number'))) ||
-    candidates.find((instrument) => normalizeKey(instrument.model) && normalizedText.includes(normalizeKey(instrument.model))) ||
-    candidates.find((instrument) => normalizeKey(instrument.model) && normalizeKey(instrument.model).includes(normalizeKey(itemSpecValue(item, 'model')))) ||
-    candidates.find((instrument) => normalizeKey(instrument.name) && normalizedText.includes(normalizeKey(instrument.name))) ||
-    candidates[0] ||
+    candidates.find((instrument) => {
+      const model = normalizeKey(instrument.model);
+      return model && exactModelValues.includes(model);
+    }) ||
+    candidates.find((instrument) => {
+      const internalId = normalizeKey(instrument.instrumentId);
+      return internalId && exactInstrumentIdValues.includes(internalId);
+    }) ||
+    candidates.find((instrument) => {
+      const serial = normalizeKey(instrument.serial);
+      return serial && serial.length >= 4 && exactSerialValues.includes(serial);
+    }) ||
     null
   );
 };
@@ -771,10 +725,13 @@ const itemQuantity = (item) => {
   return Number.isFinite(numeric) && numeric > 0 ? Math.max(1, Math.floor(numeric)) : 1;
 };
 
+const isMatchedReportItem = (item) => !(item?.missing || item?.matched === false);
+
 const runningCertificateNumber = (items = [], itemIndex = 0, unitIndex = 0) => {
   const resolvedItemIndex = Math.max(0, Number(itemIndex) || 0);
   const previousUnits = items
     .slice(0, resolvedItemIndex)
+    .filter(isMatchedReportItem)
     .reduce((total, currentItem) => total + itemQuantity(currentItem), 0);
 
   return previousUnits + Math.max(0, Number(unitIndex) || 0) + 1;
@@ -837,11 +794,10 @@ export const buildCalibrationReportFromErpItem = async ({
     throw error;
   }
 
-  const instrument = await findInstrumentForItem(item, instrumentId);
-  const resolvedInstrument = instrument || await buildFallbackInstrumentFromItem(item);
+  const resolvedInstrument = await findInstrumentForItem(item, instrumentId);
 
   if (!resolvedInstrument) {
-    const error = new Error('No matching internal instrument found for selected ERPNext item');
+    const error = new Error('No exact internal instrument match found for selected ERPNext item');
     error.statusCode = 404;
     throw error;
   }
@@ -864,7 +820,7 @@ export const buildCalibrationReportFromErpItem = async ({
     type: 'calibration',
     certificateNo,
     customerId: sourceReport.customerId,
-    instrumentId: resolvedInstrument.__fallbackTemplate ? null : resolvedInstrument.id,
+    instrumentId: resolvedInstrument.id,
     invoiceId: sourceReport.invoiceId,
     issueDate: now,
     status: 'Calibrated & Passed',
@@ -888,7 +844,7 @@ export const buildCalibrationReportFromErpItem = async ({
       quantity,
     })),
     refStandards: JSON.stringify(refStandards),
-    customRemark: `Generated from ERPNext invoice ${sourceReport.invoice?.invoiceNumber || sourceReport.tcNumber || ''}. PO: ${sourceReport.poNumber || 'N/A'}. Line ${Number(itemIndex) + 1}, unit ${normalizedUnitIndex + 1} of ${quantity}${resolvedInstrument.__fallbackTemplate ? '. Internal category template used because no exact instrument match was found.' : ''}`,
+    customRemark: `Generated from ERPNext invoice ${sourceReport.invoice?.invoiceNumber || sourceReport.tcNumber || ''}. PO: ${sourceReport.poNumber || 'N/A'}. Line ${Number(itemIndex) + 1}, unit ${normalizedUnitIndex + 1} of ${quantity}`,
     calibratedByName: 'Rahul Patel',
     calibratedByDesignation: 'Lab Engineer',
     approvedByName: 'Prashant Patel',
