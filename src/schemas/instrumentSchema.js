@@ -2,7 +2,7 @@ import Joi from 'joi';
 
 export const createInstrumentSchema = Joi.object({
   name: Joi.string().required(),
-  serial: Joi.string().required(),
+  serial: Joi.string().optional().allow('', null),
   make: Joi.string().required(),
   model: Joi.string().required(),
   category: Joi.string().required(),

@@ -54,6 +54,7 @@ export const createInstrument = async (req, res) => {
   try {
     // Convert empty strings to null for optional fields
     const data = { ...req.validated }
+    if (!data.serial || data.serial.trim() === '') data.serial = 'N/A'
     if (data.dueDate === '' || data.dueDate === null) data.dueDate = undefined
     if (data.series === '') data.series = null
     if (data.rangeStart === '') data.rangeStart = null
@@ -88,6 +89,7 @@ export const updateInstrument = async (req, res) => {
 
     // Convert empty strings to null for optional fields
     const data = { ...req.validated }
+    if (data.serial === '' || data.serial === null) delete data.serial
     if (data.dueDate === '' || data.dueDate === null) data.dueDate = undefined
     if (data.series === '') data.series = null
     if (data.rangeStart === '') data.rangeStart = null
