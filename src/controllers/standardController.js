@@ -4,6 +4,47 @@ import logger from '../config/logger.js';
 const { PrismaClient } = pkg;
 const prisma = new PrismaClient();
 
+const normalizeStandardData = (validated, { requireCalibrationDate = false } = {}) => {
+  const data = { ...validated };
+  const errors = [];
+
+  const normalizeDate = (field, { clearBlank = false, required = false } = {}) => {
+    if (data[field] === undefined) {
+      if (required) errors.push(`${field} is required`);
+      return;
+    }
+
+    if (data[field] === '' || data[field] === null) {
+      if (required) {
+        errors.push(`${field} is required`);
+      } else {
+        data[field] = clearBlank ? null : undefined;
+      }
+      return;
+    }
+
+    const date = data[field] instanceof Date ? data[field] : new Date(data[field]);
+    if (Number.isNaN(date.getTime())) {
+      errors.push(`${field} must be a valid date`);
+      return;
+    }
+
+    data[field] = date;
+  };
+
+  normalizeDate('calibrationDate', { required: requireCalibrationDate });
+  normalizeDate('certExpiry', { clearBlank: true });
+
+  if (data.instrumentId === '' || data.instrumentId === null) data.instrumentId = null;
+  if (data.reportNo === '' || data.reportNo === null) data.reportNo = '';
+  if (data.make === '') data.make = null;
+  if (data.serial === '') data.serial = null;
+  if (data.range === '') data.range = null;
+  if (data.accuracy === '') data.accuracy = null;
+
+  return { data, errors };
+};
+
 export const getAllStandards = async (req, res) => {
   try {
     const { search } = req.query;
@@ -30,8 +71,11 @@ export const getAllStandards = async (req, res) => {
 
 export const createStandard = async (req, res) => {
   try {
+    const { data, errors } = normalizeStandardData(req.validated, { requireCalibrationDate: true });
+    if (errors.length) return res.status(400).json({ errors });
+
     const standard = await prisma.standard.create({
-      data: req.validated,
+      data,
       include: { instrumentRef: true }
     });
 
@@ -46,10 +90,12 @@ export const createStandard = async (req, res) => {
 export const updateStandard = async (req, res) => {
   try {
     const { id } = req.params;
+    const { data, errors } = normalizeStandardData(req.validated);
+    if (errors.length) return res.status(400).json({ errors });
 
     const standard = await prisma.standard.update({
       where: { id: parseInt(id) },
-      data: req.validated,
+      data,
       include: { instrumentRef: true }
     });
 
