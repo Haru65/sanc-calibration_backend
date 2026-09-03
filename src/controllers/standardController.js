@@ -4,11 +4,47 @@ import logger from '../config/logger.js';
 const { PrismaClient } = pkg;
 const prisma = new PrismaClient();
 
+const parseDateValue = (value) => {
+  if (value instanceof Date) return new Date(value);
+
+  const raw = String(value || '').trim();
+  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+
+  if (dateOnlyMatch) {
+    const [, year, month, day] = dateOnlyMatch.map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (
+      date.getUTCFullYear() !== year ||
+      date.getUTCMonth() + 1 !== month ||
+      date.getUTCDate() !== day
+    ) {
+      return null;
+    }
+
+    return date;
+  }
+
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const toUtcDateOnly = (date) =>
+  new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+
+const isFutureDate = (date) => toUtcDateOnly(date) > toUtcDateOnly(new Date());
+
+const calculateDueDate = (date) => {
+  const dueDate = new Date(date);
+  dueDate.setUTCFullYear(dueDate.getUTCFullYear() + 1);
+  dueDate.setUTCDate(dueDate.getUTCDate() - 1);
+  return dueDate;
+};
+
 const normalizeStandardData = (validated, { requireCalibrationDate = false } = {}) => {
   const data = { ...validated };
   const errors = [];
 
-  const normalizeDate = (field, { clearBlank = false, required = false } = {}) => {
+  const normalizeDate = (field, { clearBlank = false, required = false, noFuture = false } = {}) => {
     if (data[field] === undefined) {
       if (required) errors.push(`${field} is required`);
       return;
@@ -23,17 +59,26 @@ const normalizeStandardData = (validated, { requireCalibrationDate = false } = {
       return;
     }
 
-    const date = data[field] instanceof Date ? data[field] : new Date(data[field]);
-    if (Number.isNaN(date.getTime())) {
+    const date = parseDateValue(data[field]);
+    if (!date) {
       errors.push(`${field} must be a valid date`);
+      return;
+    }
+
+    if (noFuture && isFutureDate(date)) {
+      errors.push(`${field} cannot be in the future`);
       return;
     }
 
     data[field] = date;
   };
 
-  normalizeDate('calibrationDate', { required: requireCalibrationDate });
+  normalizeDate('calibrationDate', { required: requireCalibrationDate, noFuture: true });
   normalizeDate('certExpiry', { clearBlank: true });
+
+  if (data.calibrationDate instanceof Date && !data.certExpiry) {
+    data.certExpiry = calculateDueDate(data.calibrationDate);
+  }
 
   if (data.instrumentId === '' || data.instrumentId === null) data.instrumentId = null;
   if (data.reportNo === '' || data.reportNo === null) data.reportNo = '';
