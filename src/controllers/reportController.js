@@ -201,6 +201,21 @@ const refreshStandardExpiry = (standards = [], masterStandards = []) => {
   });
 };
 
+const loadMatchingStandards = async (standards = []) => {
+  const keys = [...new Set(standards.flatMap(standardKeyValues))];
+  if (!keys.length) return [];
+
+  return prisma.standard.findMany({
+    where: {
+      OR: [
+        { certificateNo: { in: keys } },
+        { reportNo: { in: keys } },
+        { serial: { in: keys } },
+      ],
+    },
+  });
+};
+
 const instrumentFromReport = (report) =>
   report.instrument || {
     name: report.instrumentName,
@@ -211,16 +226,20 @@ const instrumentFromReport = (report) =>
     standards: [],
   };
 
-const withResolvedStandards = (report) => {
+const withResolvedStandards = async (report) => {
   if (!report || report.type !== 'calibration') return report;
 
   const storedStandards = parseJsonList(report.refStandards);
   const resolvedStandards = storedStandards.some(hasUsableStandard)
     ? storedStandards
     : buildReportStandards(instrumentFromReport(report));
+  const matchingStandards = await loadMatchingStandards(resolvedStandards);
   const refStandards = refreshStandardExpiry(
     resolvedStandards,
-    report.instrument?.standards || []
+    [
+      ...(report.instrument?.standards || []),
+      ...matchingStandards,
+    ]
   );
 
   return {
@@ -345,7 +364,7 @@ export const getAllReports = async (req, res) => {
       take: limit,
     });
 
-    res.json(reports.map(withResolvedStandards));
+    res.json(await Promise.all(reports.map(withResolvedStandards)));
   } catch (error) {
     logger.error('Get reports error:', error);
     res.status(500).json({ error: 'Failed to fetch reports' });
@@ -365,7 +384,7 @@ export const getReportById = async (req, res) => {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    res.json(withResolvedStandards(report));
+    res.json(await withResolvedStandards(report));
   } catch (error) {
     logger.error('Get report error:', error);
     res.status(500).json({ error: 'Failed to fetch report' });
@@ -384,7 +403,7 @@ export const createReport = async (req, res) => {
     });
 
     logger.info(`Report created: ${report.id}`);
-    res.status(201).json(withResolvedStandards(report));
+    res.status(201).json(await withResolvedStandards(report));
   } catch (error) {
     logger.error('Create report error:', error);
     res.status(500).json({ error: 'Failed to create report' });
@@ -414,7 +433,7 @@ export const updateReport = async (req, res) => {
     });
 
     logger.info(`Report updated: ${id}`);
-    res.json(withResolvedStandards(report));
+    res.json(await withResolvedStandards(report));
   } catch (error) {
     if (error.code === 'P2025') {
       return res.status(404).json({ error: 'Report not found' });

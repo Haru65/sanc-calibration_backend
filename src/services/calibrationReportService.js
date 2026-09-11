@@ -575,6 +575,53 @@ export const buildReportStandards = (instrument) => {
   return [defaultStandardForInstrument(instrument)];
 };
 
+const standardKeyValues = (standard = {}) => [
+  standard.cert,
+  standard.certificateNo,
+  standard.reportNo,
+  standard.serial,
+  standard.serialNo,
+  standard.id,
+]
+  .map((value) => String(value || '').trim().toUpperCase())
+  .filter(Boolean);
+
+const hydrateReferenceStandards = async (standards = []) => {
+  const keys = [...new Set(standards.flatMap(standardKeyValues))];
+  if (!keys.length) return standards;
+
+  const masters = await prisma.standard.findMany({
+    where: {
+      OR: [
+        { certificateNo: { in: keys } },
+        { reportNo: { in: keys } },
+        { serial: { in: keys } },
+      ],
+    },
+  });
+  const masterByKey = new Map();
+
+  masters.forEach((master) => {
+    standardKeyValues(master).forEach((key) => {
+      if (!masterByKey.has(key)) masterByKey.set(key, master);
+    });
+  });
+
+  return standards.map((standard) => {
+    const master = standardKeyValues(standard)
+      .map((key) => masterByKey.get(key))
+      .find(Boolean);
+
+    if (!master?.certExpiry) return standard;
+
+    return {
+      ...standard,
+      certExpiry: master.certExpiry,
+      validUpto: formatDate(master.certExpiry),
+    };
+  });
+};
+
 const nonEmpty = (...values) => {
   const found = values.find((value) => value !== undefined && value !== null && String(value).trim() !== '');
   return found ?? 'N/A';
@@ -812,7 +859,7 @@ export const buildCalibrationReportFromErpItem = async ({
     sourceReport.invoice?.invoiceNumber || sourceReport.tcNumber,
     runningNumber
   );
-  const refStandards = buildReportStandards(resolvedInstrument);
+  const refStandards = await hydrateReferenceStandards(buildReportStandards(resolvedInstrument));
   const reportData = {
     type: 'calibration',
     certificateNo,
@@ -854,7 +901,11 @@ export const buildCalibrationReportFromErpItem = async ({
     create: reportData,
     include: {
       customer: true,
-      instrument: true,
+      instrument: {
+        include: {
+          standards: true,
+        },
+      },
       invoice: true,
     },
   });
