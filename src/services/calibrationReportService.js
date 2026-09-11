@@ -467,28 +467,24 @@ const DEFAULT_REFERENCE_STANDARDS = [
     serial: '68281901172',
     cert: 'CAL-25050083/ET/01',
     reportNo: 'CAL-25050083/ET/01',
-    validUpto: '12/05/2026',
   },
   {
     name: 'Digital Manometer',
     serial: '005TTW',
     cert: 'CAL-25100187/PR/03',
     reportNo: 'CAL-25100187/PR/03',
-    validUpto: '17/10/2026',
   },
   {
     name: 'Digital Manometer',
     serial: '014L56',
     cert: 'CAL-25100187/PR/02',
     reportNo: 'CAL-25100187/PR/02',
-    validUpto: '17/10/2026',
   },
   {
     name: 'Digital Manometer',
     serial: '005PWD',
     cert: 'CAL-25100187/PR/01',
     reportNo: 'CAL-25100187/PR/01',
-    validUpto: '17/10/2026',
   },
 ];
 
@@ -539,7 +535,8 @@ const buildStandards = (standards = []) => {
         serial: standard.serial || mapped?.serial || '',
         cert: standard.certificateNo || standard.reportNo || mapped?.cert || '',
         reportNo: standard.reportNo || mapped?.reportNo || '',
-        validUpto: formatDate(standard.certExpiry) || mapped?.validUpto || '',
+        certExpiry: standard.certExpiry || '',
+        validUpto: formatDate(standard.certExpiry) || standard.validUpto || '',
       };
     })
     .filter((standard) => standard.name || standard.serial || standard.cert || standard.validUpto);

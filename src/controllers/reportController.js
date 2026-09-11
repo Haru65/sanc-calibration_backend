@@ -149,6 +149,58 @@ const hasUsableStandard = (standard) => {
   ].some((value) => value !== undefined && value !== null && !Array.isArray(value) && String(value).trim() !== '');
 };
 
+const standardKeyValues = (standard = {}) => [
+  standard.cert,
+  standard.certificateNo,
+  standard.reportNo,
+  standard.serial,
+  standard.serialNo,
+  standard.id,
+]
+  .map((value) => String(value || '').trim().toUpperCase())
+  .filter(Boolean);
+
+const standardDisplayDate = (value) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  return `${day}-${month}-${date.getFullYear()}`;
+};
+
+const indexStandards = (standards = []) => {
+  const index = new Map();
+
+  standards.forEach((standard) => {
+    standardKeyValues(standard).forEach((key) => {
+      if (!index.has(key)) index.set(key, standard);
+    });
+  });
+
+  return index;
+};
+
+const refreshStandardExpiry = (standards = [], masterStandards = []) => {
+  const masterByKey = indexStandards(masterStandards);
+
+  return standards.map((standard) => {
+    if (!standard || typeof standard !== 'object') return standard;
+
+    const master = standardKeyValues(standard)
+      .map((key) => masterByKey.get(key))
+      .find(Boolean);
+
+    if (!master?.certExpiry) return standard;
+
+    return {
+      ...standard,
+      certExpiry: master.certExpiry,
+      validUpto: standardDisplayDate(master.certExpiry),
+    };
+  });
+};
+
 const instrumentFromReport = (report) =>
   report.instrument || {
     name: report.instrumentName,
@@ -163,9 +215,13 @@ const withResolvedStandards = (report) => {
   if (!report || report.type !== 'calibration') return report;
 
   const storedStandards = parseJsonList(report.refStandards);
-  const refStandards = storedStandards.some(hasUsableStandard)
+  const resolvedStandards = storedStandards.some(hasUsableStandard)
     ? storedStandards
     : buildReportStandards(instrumentFromReport(report));
+  const refStandards = refreshStandardExpiry(
+    resolvedStandards,
+    report.instrument?.standards || []
+  );
 
   return {
     ...report,
