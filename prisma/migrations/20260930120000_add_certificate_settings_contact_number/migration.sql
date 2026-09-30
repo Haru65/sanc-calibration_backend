@@ -1,0 +1,2 @@
+ALTER TABLE "CertificateSettings"
+ADD COLUMN "contactNumber" TEXT NOT NULL DEFAULT '+91 99673 28933';

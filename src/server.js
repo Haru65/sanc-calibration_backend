@@ -16,6 +16,7 @@ import invoiceRoutes from './routes/invoices.js';
 import reportRoutes from './routes/reports.js';
 import dashboardRoutes from './routes/dashboard.js';
 import erpnextRoutes from './routes/erpnext.js';
+import certificateSettingsRoutes from './routes/certificateSettings.js';
 
 dotenv.config();
 
@@ -76,6 +77,7 @@ app.use('/invoices', invoiceRoutes);
 app.use('/reports', reportRoutes);
 app.use('/dashboard', dashboardRoutes);
 app.use('/erpnext', erpnextRoutes);
+app.use('/certificate-settings', certificateSettingsRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

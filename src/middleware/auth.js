@@ -1,5 +1,9 @@
 import jwt from 'jsonwebtoken';
+import pkg from '@prisma/client';
 import logger from '../config/logger.js';
+
+const { PrismaClient } = pkg;
+const prisma = new PrismaClient();
 
 export const SESSION_COOKIE_NAME = 'sanc_session';
 export const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -61,10 +65,37 @@ export const authenticate = (req, res, next) => {
   }
 }
 
-export const generateToken = (userId, username) => {
+export const requireRole = (...roles) => {
+  const allowedRoles = new Set(roles.map((role) => String(role).trim().toLowerCase()));
+
+  return async (req, res, next) => {
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: req.user?.userId },
+        select: { role: true },
+      });
+
+      const role = String(user?.role || '').trim().toLowerCase();
+      if (!allowedRoles.has(role)) {
+        return res.status(403).json({ error: 'You do not have permission to perform this action' });
+      }
+
+      req.user.role = user.role;
+      next();
+    } catch (error) {
+      logger.error('Role authorization failed:', error);
+      res.status(500).json({ error: 'Failed to verify access permissions' });
+    }
+  };
+};
+
+export const requireAdmin = requireRole('admin', 'superadmin');
+export const requireSuperAdmin = requireRole('superadmin');
+
+export const generateToken = (userId, username, role) => {
   const secret = process.env.JWT_SECRET || 'sanc-calibration-2026-dev-key-12345';
   return jwt.sign(
-    { userId, username },
+    { userId, username, role },
     secret,
     { expiresIn: process.env.JWT_EXPIRE || '7d' }
   );

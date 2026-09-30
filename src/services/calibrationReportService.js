@@ -889,10 +889,10 @@ export const buildCalibrationReportFromErpItem = async ({
     })),
     refStandards: JSON.stringify(refStandards),
     customRemark: `Generated from ERPNext invoice ${sourceReport.invoice?.invoiceNumber || sourceReport.tcNumber || ''}. PO: ${sourceReport.poNumber || 'N/A'}. Line ${Number(itemIndex) + 1}, unit ${normalizedUnitIndex + 1} of ${quantity}`,
-    calibratedByName: 'Rahul Patel',
-    calibratedByDesignation: 'Lab Engineer',
-    approvedByName: 'Prashant Patel',
-    approvedByDesignation: 'Lab Incharge',
+    calibratedByName: 'Priyanshu Surti',
+    calibratedByDesignation: '',
+    approvedByName: 'Nitesh Yadav',
+    approvedByDesignation: '',
   };
 
   return prisma.report.upsert({

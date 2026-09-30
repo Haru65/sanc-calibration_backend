@@ -168,6 +168,18 @@ model Report {
   invoice         Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
 }
 
+model CertificateSettings {
+  id                    Int      @id @default(1)
+  email                 String   @default("navreet@sanc.in")
+  contactNumber         String   @default("+91 99673 28933")
+  calibratedByName      String   @default("Priyanshu Surti")
+  calibratedBySignature String?  @db.Text
+  approvedByName        String   @default("Nitesh Yadav")
+  approvedBySignature   String?  @db.Text
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
 model ActivityLog {
   id        Int     @id @default(autoincrement())
   action    String
