@@ -464,24 +464,28 @@ const buildReadings = (instrument, options = {}) => {
 const DEFAULT_REFERENCE_STANDARDS = [
   {
     name: 'Multifunctional Calibrator',
+    model: 'ASC-400',
     serial: '68281901172',
     cert: 'CAL-25050083/ET/01',
     reportNo: 'CAL-25050083/ET/01',
   },
   {
     name: 'Digital Manometer',
+    model: '477AV-00',
     serial: '005TTW',
     cert: 'CAL-25100187/PR/03',
     reportNo: 'CAL-25100187/PR/03',
   },
   {
     name: 'Digital Manometer',
+    model: '477B-1',
     serial: '014L56',
     cert: 'CAL-25100187/PR/02',
     reportNo: 'CAL-25100187/PR/02',
   },
   {
     name: 'Digital Manometer',
+    model: '477AV-2',
     serial: '005PWD',
     cert: 'CAL-25100187/PR/01',
     reportNo: 'CAL-25100187/PR/01',
@@ -532,6 +536,7 @@ const buildStandards = (standards = []) => {
 
       return {
         name: standard.instrument || mapped?.name || '',
+        model: standard.instrumentRef?.model || standard.model || mapped?.model || '',
         serial: standard.serial || mapped?.serial || '',
         cert: standard.certificateNo || standard.reportNo || mapped?.cert || '',
         reportNo: standard.reportNo || mapped?.reportNo || '',
@@ -586,38 +591,79 @@ const standardKeyValues = (standard = {}) => [
   .map((value) => String(value || '').trim().toUpperCase())
   .filter(Boolean);
 
-const hydrateReferenceStandards = async (standards = []) => {
+const standardModelValue = (standard = {}) => {
+  const explicitModel = standard.model || standard.instrumentRef?.model;
+  if (explicitModel) return String(explicitModel).trim().toUpperCase();
+
+  const mapped = standardKeyValues(standard)
+    .map((key) => STANDARD_KEYS[key])
+    .find(Boolean);
+  return String(mapped?.model || '').trim().toUpperCase();
+};
+
+export const hydrateReferenceStandards = async (standards = []) => {
   const keys = [...new Set(standards.flatMap(standardKeyValues))];
-  if (!keys.length) return standards;
+  const models = [...new Set(standards.map(standardModelValue).filter(Boolean))];
+  if (!keys.length && !models.length) return standards;
+
+  const matchers = [];
+  if (keys.length) {
+    matchers.push(
+      { certificateNo: { in: keys } },
+      { reportNo: { in: keys } },
+      { serial: { in: keys } },
+    );
+  }
+  if (models.length) {
+    matchers.push({
+      instrumentRef: {
+        is: { model: { in: models, mode: 'insensitive' } },
+      },
+    });
+  }
 
   const masters = await prisma.standard.findMany({
-    where: {
-      OR: [
-        { certificateNo: { in: keys } },
-        { reportNo: { in: keys } },
-        { serial: { in: keys } },
-      ],
-    },
+    where: { OR: matchers },
+    include: { instrumentRef: true },
+    orderBy: [
+      { calibrationDate: 'desc' },
+      { updatedAt: 'desc' },
+    ],
   });
   const masterByKey = new Map();
+  const masterByModel = new Map();
 
   masters.forEach((master) => {
     standardKeyValues(master).forEach((key) => {
       if (!masterByKey.has(key)) masterByKey.set(key, master);
     });
+    const model = standardModelValue(master);
+    if (model && !masterByModel.has(model)) masterByModel.set(model, master);
   });
 
   return standards.map((standard) => {
-    const master = standardKeyValues(standard)
+    // Prefer the newest saved calibration for the same master-equipment model.
+    // Exact-key lookup remains as a fallback for standards without a model.
+    const model = standardModelValue(standard);
+    const master = masterByModel.get(model) || standardKeyValues(standard)
       .map((key) => masterByKey.get(key))
       .find(Boolean);
 
-    if (!master?.certExpiry) return standard;
+    if (!master) return standard;
+
+    const masterModel = master.instrumentRef?.model || model || standard.model || '';
+    const masterSerial = master.serial || master.instrumentRef?.serial || master.certificateNo || '';
+    const masterReportNo = master.reportNo || master.certificateNo || '';
 
     return {
       ...standard,
+      name: master.instrumentRef?.name || master.instrument || standard.name || '',
+      model: masterModel,
+      serial: masterSerial,
+      cert: masterReportNo,
+      reportNo: masterReportNo,
       certExpiry: master.certExpiry,
-      validUpto: formatDate(master.certExpiry),
+      validUpto: formatDate(master.certExpiry) || standard.validUpto || '',
     };
   });
 };
