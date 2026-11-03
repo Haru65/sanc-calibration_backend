@@ -550,9 +550,15 @@ export const reprocessPendingErpNextInvoices = async ({ limit = 500, dryRun = fa
 
 export const syncErpNextInvoices = async (req, res) => {
   try {
-    const limit = req.query.limit || req.body?.limit || 50;
     const includeIntegratedValue = req.query.includeIntegrated ?? req.body?.includeIntegrated;
     const includeIntegrated = ['1', 'true'].includes(String(includeIntegratedValue).toLowerCase());
+    const requestedLimit = Number.parseInt(req.query.limit || req.body?.limit || '50', 10);
+    // Legacy clients requested 50 already-integrated invoices in one HTTP
+    // request. That work is serial and can outlive an Nginx proxy timeout.
+    const maximumLimit = includeIntegrated ? 10 : 50;
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(Math.max(requestedLimit, 1), maximumLimit)
+      : maximumLimit;
     const result = await runErpNextInvoiceSync({ limit, includeIntegrated });
     res.json(result);
   } catch (error) {
