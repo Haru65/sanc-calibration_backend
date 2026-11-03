@@ -11,6 +11,26 @@ import {
 const { PrismaClient } = pkg;
 const prisma = new PrismaClient();
 
+// Chromium is the most memory-intensive part of the API. Serializing PDF jobs
+// prevents concurrent exports from exhausting a small production instance and
+// terminating an HTTP response after its Content-Length has already been sent.
+let pdfRenderQueue = Promise.resolve();
+
+const queuePdfRender = async (render) => {
+  const previousRender = pdfRenderQueue;
+  let releaseQueue;
+  pdfRenderQueue = new Promise((resolve) => {
+    releaseQueue = resolve;
+  });
+
+  await previousRender;
+  try {
+    return await render();
+  } finally {
+    releaseQueue();
+  }
+};
+
 const chromeCandidates = [
   process.env.CHROME_PATH,
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -74,7 +94,9 @@ const renderHtmlToPdf = async (html) => {
 
   try {
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: ['load', 'networkidle0'], timeout: 30000 });
+    // `networkidle0` can wait indefinitely when certificate HTML contains a
+    // remote font or asset. The load event already waits for page resources.
+    await page.setContent(html, { waitUntil: 'load', timeout: 30000 });
     await page.emulateMediaType('print');
 
     return await page.pdf({
@@ -312,12 +334,18 @@ export const renderReportPdf = async (req, res) => {
       return res.status(400).json({ error: 'Printable HTML is required' });
     }
 
-    const pdf = await renderHtmlToPdf(html);
+    const pdf = await queuePdfRender(() => renderHtmlToPdf(html));
+    const pdfBody = Buffer.isBuffer(pdf) ? pdf : Buffer.from(pdf);
     const cleanFilename = `${safePdfFilename(filename)}.pdf`;
 
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${cleanFilename}"`);
-    res.send(pdf);
+    res.status(200);
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${cleanFilename}"`,
+      'Content-Length': String(pdfBody.length),
+      'Cache-Control': 'no-store',
+    });
+    res.end(pdfBody);
   } catch (error) {
     logger.error('Render report PDF error:', error);
     res.status(500).json({ error: error.message || 'Failed to render PDF' });
