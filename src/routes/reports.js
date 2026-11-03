@@ -35,7 +35,9 @@ const router = express.Router();
  */
 router.get('/', authenticate, getAllReports);
 
-router.post('/render-pdf', authenticate, renderReportPdf);
+// Authentication and the route-specific JSON limit are applied in server.js
+// before the general 10 MB JSON parser.
+router.post('/render-pdf', renderReportPdf);
 router.post('/calculate-readings', authenticate, calculateReportReadings);
 
 /**

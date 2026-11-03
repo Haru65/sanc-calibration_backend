@@ -6,6 +6,7 @@ import rateLimit from 'express-rate-limit';
 import logger from './config/logger.js';
 import swaggerSpec from './config/swagger.js';
 import { handleErrors } from './middleware/validation.js';
+import { authenticate } from './middleware/auth.js';
 import { startErpNextAutoSync } from './services/erpnextScheduler.js';
 
 import authRoutes from './routes/auth.js';
@@ -47,6 +48,13 @@ app.use(cors(corsOptions));
 // Handle preflight requests
 app.options('*', cors(corsOptions));
 
+// PDF HTML can contain base64 signatures and multi-page certificates. Authenticate
+// before accepting its larger body; all other API requests retain the lower limit.
+app.use(
+  '/reports/render-pdf',
+  authenticate,
+  express.json({ limit: process.env.PDF_REQUEST_LIMIT || '30mb' })
+);
 app.use(express.json({ limit: '10mb' }));
 
 // The production Node process is directly behind one reverse proxy (Nginx).
