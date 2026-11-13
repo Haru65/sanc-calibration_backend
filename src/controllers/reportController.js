@@ -183,7 +183,7 @@ const instrumentFromReport = (report) =>
   };
 
 const withResolvedStandards = async (report) => {
-  if (!report || report.type !== 'calibration') return report;
+  if (!report || String(report.type || '').toLowerCase() !== 'calibration') return report;
 
   const storedStandards = parseJsonList(report.refStandards);
   const resolvedStandards = storedStandards.some(hasUsableStandard)

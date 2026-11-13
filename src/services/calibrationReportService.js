@@ -461,85 +461,105 @@ const buildReadings = (instrument, options = {}) => {
   };
 };
 
-const DEFAULT_REFERENCE_STANDARDS = [
+// These records describe stable master identities only. Certificate numbers and
+// validity dates are deliberately not stored here: those values must always
+// come from the current Standard row in the database.
+const REFERENCE_STANDARD_IDENTITIES = [
   {
     name: 'Multifunctional Calibrator',
     model: 'ASC-400',
     serial: '68281901172',
-    cert: 'CAL-25050083/ET/01',
-    reportNo: 'CAL-25050083/ET/01',
+    reportSuffix: '/ET/01',
+    legacyKeys: ['CAL-25050083/ET/01'],
   },
   {
     name: 'Digital Manometer',
     model: '477AV-00',
     serial: '005TTW',
-    cert: 'CAL-25100187/PR/03',
-    reportNo: 'CAL-25100187/PR/03',
+    reportSuffix: '/PR/03',
+    legacyKeys: ['CAL-25100187/PR/03'],
   },
   {
     name: 'Digital Manometer',
     model: '477B-1',
     serial: '014L56',
-    cert: 'CAL-25100187/PR/02',
-    reportNo: 'CAL-25100187/PR/02',
+    reportSuffix: '/PR/02',
+    legacyKeys: ['CAL-25100187/PR/02'],
   },
   {
     name: 'Digital Manometer',
     model: '477AV-2',
     serial: '005PWD',
-    cert: 'CAL-25100187/PR/01',
-    reportNo: 'CAL-25100187/PR/01',
+    reportSuffix: '/PR/01',
+    legacyKeys: ['CAL-25100187/PR/01'],
   },
 ];
 
-const STANDARD_KEYS = {
-  'ASC-400': DEFAULT_REFERENCE_STANDARDS[0],
-  'CAL-25050083/ET/01': DEFAULT_REFERENCE_STANDARDS[0],
-  '68281901172': DEFAULT_REFERENCE_STANDARDS[0],
-  '477AV-00': DEFAULT_REFERENCE_STANDARDS[1],
-  'CAL-25100187/PR/03': DEFAULT_REFERENCE_STANDARDS[1],
-  '005TTW': DEFAULT_REFERENCE_STANDARDS[1],
-  '477B-1': DEFAULT_REFERENCE_STANDARDS[2],
-  'CAL-25100187/PR/02': DEFAULT_REFERENCE_STANDARDS[2],
-  '014L56': DEFAULT_REFERENCE_STANDARDS[2],
-  '477AV-2': DEFAULT_REFERENCE_STANDARDS[3],
-  'CAL-25100187/PR/01': DEFAULT_REFERENCE_STANDARDS[3],
-  '005PWD': DEFAULT_REFERENCE_STANDARDS[3],
+const normalizeStandardKey = (value) => String(value || '').trim().toUpperCase();
+
+const STANDARD_IDENTITIES_BY_KEY = new Map(
+  REFERENCE_STANDARD_IDENTITIES.flatMap((identity) =>
+    [identity.model, identity.serial, ...identity.legacyKeys]
+      .map((key) => [normalizeStandardKey(key), identity])
+  )
+);
+
+const referenceStandardIdentity = (standard = {}) => {
+  const values = [
+    standard.model,
+    standard.instrumentRef?.instrumentId,
+    standard.instrumentRef?.model,
+    standard.cert,
+    standard.certificateNo,
+    standard.reportNo,
+    standard.serial,
+    standard.serialNo,
+    standard.id,
+  ].map(normalizeStandardKey).filter(Boolean);
+
+  const exact = values.map((value) => STANDARD_IDENTITIES_BY_KEY.get(value)).find(Boolean);
+  if (exact) return exact;
+
+  return REFERENCE_STANDARD_IDENTITIES.find((identity) =>
+    values.some((value) => value.endsWith(identity.reportSuffix))
+  );
 };
+
+const identitySnapshot = (identity) => ({
+  name: identity.name,
+  model: identity.model,
+  serial: identity.serial,
+  cert: '',
+  reportNo: '',
+  certExpiry: '',
+  validUpto: '',
+});
 
 const defaultStandardForInstrument = (instrument) => {
   const raw = `${instrument?.category || ''} ${instrument?.name || ''} ${instrument?.model || ''}`.toLowerCase();
 
   if (raw.includes('transmitter') || raw.includes('humidity')) {
-    return DEFAULT_REFERENCE_STANDARDS[0];
+    return identitySnapshot(REFERENCE_STANDARD_IDENTITIES[0]);
   }
 
   if (raw.includes('gauge') || raw.includes('pressure') || raw.includes('switch')) {
-    return DEFAULT_REFERENCE_STANDARDS[1];
+    return identitySnapshot(REFERENCE_STANDARD_IDENTITIES[1]);
   }
 
-  return DEFAULT_REFERENCE_STANDARDS[0];
+  return identitySnapshot(REFERENCE_STANDARD_IDENTITIES[0]);
 };
 
 const buildStandards = (standards = []) => {
   return standards
     .map((standard) => {
-      const key = String(
-        standard.reportNo ||
-        standard.certificateNo ||
-        standard.serial ||
-        standard.model ||
-        standard.instrument ||
-        ''
-      ).toUpperCase();
-      const mapped = STANDARD_KEYS[key];
+      const identity = referenceStandardIdentity(standard);
 
       return {
-        name: standard.instrument || mapped?.name || '',
-        model: standard.instrumentRef?.model || standard.model || mapped?.model || '',
-        serial: standard.serial || mapped?.serial || '',
-        cert: standard.certificateNo || standard.reportNo || mapped?.cert || '',
-        reportNo: standard.reportNo || mapped?.reportNo || '',
+        name: standard.instrument || identity?.name || '',
+        model: identity?.model || standard.instrumentRef?.instrumentId || standard.instrumentRef?.model || standard.model || '',
+        serial: standard.serial || identity?.serial || '',
+        cert: standard.reportNo || standard.certificateNo || '',
+        reportNo: standard.reportNo || standard.certificateNo || '',
         certExpiry: standard.certExpiry || '',
         validUpto: formatDate(standard.certExpiry) || standard.validUpto || '',
       };
@@ -566,8 +586,9 @@ export const buildReportStandards = (instrument) => {
   ];
   const seen = new Set();
   const matched = codes
-    .map((code) => STANDARD_KEYS[code.toUpperCase()] || STANDARD_KEYS[code])
+    .map((code) => referenceStandardIdentity({ model: code }))
     .filter(Boolean)
+    .map(identitySnapshot)
     .filter((standard) => {
       const key = standard.reportNo || standard.cert || standard.serial || standard.name;
       if (seen.has(key)) return false;
@@ -592,13 +613,67 @@ const standardKeyValues = (standard = {}) => [
   .filter(Boolean);
 
 const standardModelValue = (standard = {}) => {
-  const explicitModel = standard.model || standard.instrumentRef?.model;
-  if (explicitModel) return String(explicitModel).trim().toUpperCase();
+  // Standards are linked to customer instruments. For these records the
+  // master-equipment code (477B-1, 477AV-2, ...) is stored in the linked
+  // Instrument.instrumentId; Instrument.model is the customer's device model.
+  const identity = referenceStandardIdentity(standard);
+  if (identity) return identity.model;
 
-  const mapped = standardKeyValues(standard)
-    .map((key) => STANDARD_KEYS[key])
-    .find(Boolean);
-  return String(mapped?.model || '').trim().toUpperCase();
+  const explicitModel = standard.model || standard.instrumentRef?.instrumentId || standard.instrumentRef?.model;
+  if (explicitModel) return String(explicitModel).trim().toUpperCase();
+  return '';
+};
+
+export const resolveReferenceStandards = (standards = [], masters = []) => {
+  const masterByKey = new Map();
+  const masterByModel = new Map();
+
+  // Callers provide newest rows first, matching the database query below.
+  masters.forEach((master) => {
+    standardKeyValues(master).forEach((key) => {
+      if (!masterByKey.has(key)) masterByKey.set(key, master);
+    });
+    const model = standardModelValue(master);
+    if (model && !masterByModel.has(model)) masterByModel.set(model, master);
+  });
+
+  return standards.map((standard) => {
+    // The Standard table is authoritative. For a known master identity, prefer
+    // its newest row over a direct hit on an older certificate number.
+    const model = standardModelValue(standard);
+    const identity = referenceStandardIdentity(standard);
+    const directMaster = standardKeyValues(standard)
+      .map((key) => masterByKey.get(key))
+      .find(Boolean);
+    const master = identity
+      ? masterByModel.get(identity.model) || directMaster
+      : directMaster || masterByModel.get(model);
+
+    if (!master) return standard;
+
+    const masterModel = master.instrumentRef?.instrumentId || model || standard.model || '';
+    // Some older UI saves accidentally copied reportNo into Standard.serial.
+    // In that case retain the stable master serial/identifier instead.
+    const storedSerial = String(master.serial || '').trim();
+    const reportNumbers = [master.reportNo, master.certificateNo]
+      .map((value) => String(value || '').trim().toUpperCase());
+    const resolvedIdentity = referenceStandardIdentity(master) || identity;
+    const masterSerial = storedSerial && !reportNumbers.includes(storedSerial.toUpperCase())
+      ? storedSerial
+      : standard.serial || standard.serialNo || resolvedIdentity?.serial || master.instrumentRef?.instrumentId || '';
+    const masterReportNo = master.reportNo || master.certificateNo || '';
+
+    return {
+      ...standard,
+      name: master.instrument || standard.name || master.instrumentRef?.name || '',
+      model: masterModel,
+      serial: masterSerial,
+      cert: masterReportNo,
+      reportNo: masterReportNo,
+      certExpiry: master.certExpiry,
+      validUpto: formatDate(master.certExpiry) || standard.validUpto || '',
+    };
+  });
 };
 
 export const hydrateReferenceStandards = async (standards = []) => {
@@ -620,7 +695,24 @@ export const hydrateReferenceStandards = async (standards = []) => {
         is: { model: { in: models, mode: 'insensitive' } },
       },
     });
+    matchers.push({
+      instrumentRef: {
+        is: { instrumentId: { in: models, mode: 'insensitive' } },
+      },
+    });
   }
+  const reportSuffixes = [...new Set(
+    standards
+      .map(referenceStandardIdentity)
+      .filter(Boolean)
+      .map((identity) => identity.reportSuffix)
+  )];
+  reportSuffixes.forEach((suffix) => {
+    matchers.push(
+      { reportNo: { endsWith: suffix, mode: 'insensitive' } },
+      { certificateNo: { endsWith: suffix, mode: 'insensitive' } },
+    );
+  });
 
   const masters = await prisma.standard.findMany({
     where: { OR: matchers },
@@ -630,42 +722,7 @@ export const hydrateReferenceStandards = async (standards = []) => {
       { updatedAt: 'desc' },
     ],
   });
-  const masterByKey = new Map();
-  const masterByModel = new Map();
-
-  masters.forEach((master) => {
-    standardKeyValues(master).forEach((key) => {
-      if (!masterByKey.has(key)) masterByKey.set(key, master);
-    });
-    const model = standardModelValue(master);
-    if (model && !masterByModel.has(model)) masterByModel.set(model, master);
-  });
-
-  return standards.map((standard) => {
-    // Prefer the newest saved calibration for the same master-equipment model.
-    // Exact-key lookup remains as a fallback for standards without a model.
-    const model = standardModelValue(standard);
-    const master = masterByModel.get(model) || standardKeyValues(standard)
-      .map((key) => masterByKey.get(key))
-      .find(Boolean);
-
-    if (!master) return standard;
-
-    const masterModel = master.instrumentRef?.model || model || standard.model || '';
-    const masterSerial = master.serial || master.instrumentRef?.serial || master.certificateNo || '';
-    const masterReportNo = master.reportNo || master.certificateNo || '';
-
-    return {
-      ...standard,
-      name: master.instrumentRef?.name || master.instrument || standard.name || '',
-      model: masterModel,
-      serial: masterSerial,
-      cert: masterReportNo,
-      reportNo: masterReportNo,
-      certExpiry: master.certExpiry,
-      validUpto: formatDate(master.certExpiry) || standard.validUpto || '',
-    };
-  });
+  return resolveReferenceStandards(standards, masters);
 };
 
 const nonEmpty = (...values) => {
